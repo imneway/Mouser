@@ -70,3 +70,12 @@ Mac 的唤醒处理会 `force_reconnect()`，重连后 engine 会回放设置，
 | 鼠标打盹 | 放着不动几分钟再动 | `Device woke from sleep`，DPI 不变 |
 
 PC 端相关资料：PC 安装在 `C:\Program Files\Utilities\Mouser`（计划任务提权启动，原因见上游 issue #270），与 Mac 无关，不用管。
+
+## Mac 端进度（2026-10-09）
+
+- 第 1 项已完成：提交 1f1ca3e 新增 `core/macos_device_monitor.py`，用 `IOServiceAddMatchingNotification` 监听罗技 HID 设备出现/消失，由 macOS mouse hook 在 `start()`/`stop()` 里启停，回调调 `notify_device_change()`。日志关键字：`[DeviceMonitor] Watching for Logitech HID arrivals/removals`、`[MouseHook] Logitech device connected — re-probing`。
+- 第 2 项（唤醒后 `request_state_verify()`）没做，等实测出问题再加。
+- Mac 上完整测试：除 5 个上游 master 本来就失败的测试外全过（`test_wheel_divert.MacOSSuppressionTests` 4 个：装了真 PyObjC 时测试替换不了 Quartz；`test_engine` 那个空闲时假失败）。
+- 已装到 `/Applications/Mouser.app`，官方 3.7.3 备份为 `/Applications/Mouser-official-3.7.3.app`；`check_for_updates` 已设为 false；开机自启 LaunchAgent 指向新 app。
+- Mac 上没有 Logi Options+ / Bolt app / G HUB；有 SteerMouse 和 Mos 常驻（用户原有配置，未动）。
+- 构建用 uv 建的 Python 3.12 venv（与上游 CI 一致）：`uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -r requirements.txt`。ad-hoc 签名每次重建都会变，重装后要重新授权「辅助功能」和「输入监控」。
