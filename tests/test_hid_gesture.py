@@ -616,6 +616,63 @@ class HidDpiReapplyAfterWakeTests(unittest.TestCase):
         self.assertIsNone(listener._dpi_reapply_on_wake)
 
 
+class HidPowerCycleRestoreTests(unittest.TestCase):
+    """A mouse that was powered off/on comes back with firmware-default
+    settings while the receiver never disappears; a DPI read-back detects
+    that and queues the saved settings again."""
+
+    def _listener(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._dev = object()
+        listener._dpi_idx = 0x0D
+        listener._last_dpi_set = 2400
+        listener._last_smart_shift_req = ("ratchet", False, 25, 10)
+        return listener
+
+    @staticmethod
+    def _dpi_reply(dpi):
+        return (1, 0x0D, 2, hid_gesture.MY_SW, [0x00, (dpi >> 8) & 0xFF, dpi & 0xFF])
+
+    def test_mismatching_dpi_restores_settings_and_rearms_diverts(self):
+        listener = self._listener()
+        with (
+            patch.object(listener, "_request", return_value=self._dpi_reply(1000)),
+            patch.object(listener, "_divert", return_value=True) as divert,
+            patch.object(listener, "_divert_extras") as divert_extras,
+            patch("builtins.print"),
+        ):
+            listener._verify_device_state()
+        self.assertEqual(listener._pending_dpi, 2400)
+        self.assertEqual(listener._pending_smart_shift, ("ratchet", False, 25, 10))
+        divert.assert_called_once()
+        divert_extras.assert_called_once()
+
+    def test_matching_dpi_changes_nothing(self):
+        listener = self._listener()
+        with (
+            patch.object(listener, "_request", return_value=self._dpi_reply(2400)),
+            patch.object(listener, "_divert") as divert,
+            patch("builtins.print"),
+        ):
+            listener._verify_device_state()
+        self.assertIsNone(listener._pending_dpi)
+        divert.assert_not_called()
+
+    def test_verify_is_rate_limited(self):
+        listener = self._listener()
+        with (
+            patch.object(listener, "_request", return_value=self._dpi_reply(1000)) as req,
+            patch.object(listener, "_divert", return_value=True),
+            patch.object(listener, "_divert_extras"),
+            patch("builtins.print"),
+        ):
+            listener._verify_device_state()
+            listener._pending_dpi = None
+            listener._verify_device_state()
+        self.assertEqual(req.call_count, 1)
+        self.assertIsNone(listener._pending_dpi)
+
+
 class HidBroadcastProbeTests(unittest.TestCase):
     """All receiver slots are asked at once; whoever answers is probed first."""
 

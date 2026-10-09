@@ -1123,6 +1123,10 @@ class HidGestureListener:
         self._stray_reply = None   # late reply from another receiver slot, see _request
         self._wake_event = threading.Event()   # set by notify_device_change()
         self._dpi_reapply_on_wake = None       # DPI whose write failed while the mouse dozed
+        self._last_dpi_set = None              # last DPI the device acknowledged
+        self._last_smart_shift_req = None      # last Smart Shift tuple the device acknowledged
+        self._verify_requested = False         # re-check device state (power-cycle detection)
+        self._last_verify_time = 0.0
         # 0x2121 Hi-Res Wheel + 0x2150 Thumbwheel native-invert state.
         # Lock ordering: outer `_wheel_divert_call_lock` serializes
         # cross-thread callers, inner `_wheel_divert_lock` protects the
@@ -1978,6 +1982,7 @@ class HidGestureListener:
             print(f"[HidGesture] DPI set to {actual}")
             self._dpi_result = True
             self._dpi_reapply_on_wake = None
+            self._last_dpi_set = dpi
         else:
             print("[HidGesture] DPI set FAILED")
             self._dpi_result = False
@@ -2018,6 +2023,42 @@ class HidGestureListener:
             self._dpi_result = None
         self._pending_dpi = None
         self._dpi_event.set()
+
+    def request_state_verify(self):
+        """Ask the listener loop to check whether the device lost its settings
+        (mouse powered off and on, which resets DPI / Smart Shift / diverts to
+        firmware defaults without the receiver ever disappearing)."""
+        self._verify_requested = True
+
+    def _verify_device_state(self):
+        """Read back DPI; if it no longer matches what we last wrote, the
+        device was power-cycled: restore DPI and Smart Shift and re-arm the
+        button diverts."""
+        if self._dpi_idx is None or self._dev is None or self._last_dpi_set is None:
+            return
+        now = time.monotonic()
+        if now - self._last_verify_time < 5.0:
+            return
+        self._last_verify_time = now
+        resp = self._request(self._dpi_idx, 2, [0x00])
+        if not resp:
+            return
+        _, _, _, _, p = resp
+        current = (p[1] << 8 | p[2]) if len(p) >= 3 else None
+        if current is None or current == self._last_dpi_set:
+            return
+        print(f"[HidGesture] Device reports DPI {current}, expected {self._last_dpi_set} "
+              "-- mouse was power-cycled; restoring settings")
+        self._pending_dpi = self._last_dpi_set
+        if self._last_smart_shift_req is not None:
+            with self._smart_shift_slot_lock:
+                if self._pending_smart_shift is None:
+                    self._pending_smart_shift = self._last_smart_shift_req
+        try:
+            self._divert()
+            self._divert_extras()
+        except Exception as exc:
+            print(f"[HidGesture] re-divert after power-cycle failed: {exc}")
 
     # ── Smart Shift control ─────────────────────────────────────
 
@@ -2120,6 +2161,7 @@ class HidGestureListener:
         if resp:
             print(f"[HidGesture] Smart Shift set to {label}")
             result = True
+            self._last_smart_shift_req = pending
         else:
             print("[HidGesture] Smart Shift set FAILED")
             result = False
@@ -2796,6 +2838,9 @@ class HidGestureListener:
                 and feat == self._battery_idx
                 and func == 0 and _sw != MY_SW):
             self._handle_battery_notification(params)
+            # A device announces itself with a battery broadcast when its link
+            # comes up -- including after a power-off/on that reset its settings.
+            self._verify_requested = True
             return
 
         if feat != self._feat_idx:
@@ -3484,7 +3529,14 @@ class HidGestureListener:
                             if self._dpi_reapply_on_wake is not None and self._pending_dpi is None:
                                 print(f"[HidGesture] Re-applying DPI {self._dpi_reapply_on_wake} after wake")
                                 self._pending_dpi = self._dpi_reapply_on_wake
+                            else:
+                                self._verify_requested = True
                         continue
+
+                    # Power-cycle check requested by a link-up broadcast or wake
+                    if self._verify_requested:
+                        self._verify_requested = False
+                        self._verify_device_state()
 
                     # Apply any queued DPI command
                     if self._pending_dpi is not None:
