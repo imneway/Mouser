@@ -901,6 +901,61 @@ Item {
 
                     Rectangle {
                         width: parent.width
+                        height: menuBarIconRow.implicitHeight + 20
+                        radius: 10
+                        color: scrollPage.theme.bgSubtle
+                        visible: backend.supportsHidingMenuBarIcon
+
+                        RowLayout {
+                            id: menuBarIconRow
+                            anchors {
+                                left: parent.left
+                                right: parent.right
+                                verticalCenter: parent.verticalCenter
+                                leftMargin: 16
+                                rightMargin: 16
+                            }
+                            spacing: 12
+
+                            ColumnLayout {
+                                Layout.fillWidth: true
+                                spacing: 2
+
+                                Text {
+                                    text: s["scroll.show_menu_bar_icon"]
+                                    font {
+                                        family: uiState.fontFamily
+                                        pixelSize: 13
+                                    }
+                                    color: scrollPage.theme.textPrimary
+                                    Layout.fillWidth: true
+                                }
+
+                                Text {
+                                    text: s["scroll.show_menu_bar_icon_desc"]
+                                    font {
+                                        family: uiState.fontFamily
+                                        pixelSize: 11
+                                    }
+                                    color: scrollPage.theme.textSecondary
+                                    wrapMode: Text.WordWrap
+                                    Layout.fillWidth: true
+                                }
+                            }
+
+                            Switch {
+                                id: showMenuBarIconSwitch
+                                checked: backend.showMenuBarIcon
+                                focusPolicy: Qt.StrongFocus
+                                Material.accent: scrollPage.theme.accent
+                                Accessible.name: s["scroll.show_menu_bar_icon"]
+                                onClicked: backend.setShowMenuBarIcon(checked)
+                            }
+                        }
+                    }
+
+                    Rectangle {
+                        width: parent.width
                         height: 118
                         radius: 10
                         color: scrollPage.theme.bgSubtle
@@ -1398,6 +1453,7 @@ Item {
                 startAtLoginSwitch.checked = backend.startAtLogin
                 startMinimizedSwitch.checked = backend.startMinimized
             }
+            showMenuBarIconSwitch.checked = backend.showMenuBarIcon
             checkUpdatesSwitch.checked = backend.checkForUpdates
             vscrollSwitch.checked = backend.invertVScroll
             hscrollSwitch.checked = backend.invertHScroll

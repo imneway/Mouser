@@ -266,6 +266,7 @@ DEFAULT_CONFIG = {
     "settings": {
         "start_minimized": True,
         "start_at_login": False,
+        "show_menu_bar_icon": True,  # macOS: hide to keep Mouser out of the menu bar
         "hscroll_threshold": 0.1,
         "invert_hscroll": False,  # swap horizontal scroll directions
         "invert_vscroll": False,  # swap vertical scroll directions

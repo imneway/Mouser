@@ -1478,6 +1478,25 @@ class BackendLoginStartupTests(unittest.TestCase):
         apply_mock.assert_not_called()
         self.assertFalse(backend.startMinimized)
 
+    def test_show_menu_bar_icon_defaults_on_and_persists_changes(self):
+        cfg = copy.deepcopy(DEFAULT_CONFIG)
+        with (
+            patch("ui.backend.load_config", return_value=cfg),
+            patch("ui.backend.save_config") as save_mock,
+            patch("ui.backend.supports_login_startup", return_value=False),
+        ):
+            backend = Backend(engine=None)
+            self.assertTrue(backend.showMenuBarIcon)
+            changed = []
+            backend.settingsChanged.connect(lambda: changed.append(1))
+            backend.setShowMenuBarIcon(False)
+            backend.setShowMenuBarIcon(False)  # unchanged: no save, no signal
+
+        self.assertFalse(backend.showMenuBarIcon)
+        self.assertFalse(cfg["settings"]["show_menu_bar_icon"])
+        save_mock.assert_called_once()
+        self.assertEqual(changed, [1])
+
 
 @unittest.skipIf(Backend is None, "PySide6 not installed in test environment")
 class BackendHandleDpiReadTests(unittest.TestCase):

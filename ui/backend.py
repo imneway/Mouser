@@ -833,6 +833,16 @@ class Backend(QObject):
     def startAtLogin(self):
         return bool(self._cfg.get("settings", {}).get("start_at_login", False))
 
+    @Property(bool, notify=settingsChanged)
+    def showMenuBarIcon(self):
+        return bool(self._cfg.get("settings", {}).get("show_menu_bar_icon", True))
+
+    @Property(bool, constant=True)
+    def supportsHidingMenuBarIcon(self):
+        # Re-opening the app brings the settings window back on macOS, so the
+        # icon is never the only way in.
+        return sys.platform == "darwin"
+
     @Property(bool, constant=True)
     def supportsStartAtLogin(self):
         return supports_login_startup()
@@ -1505,6 +1515,16 @@ class Backend(QObject):
         if self.startMinimized == hidden:
             return
         self._cfg.setdefault("settings", {})["start_minimized"] = hidden
+        save_config(self._cfg)
+        self.settingsChanged.emit()
+        self.statusMessage.emit("Saved")
+
+    @Slot(bool)
+    def setShowMenuBarIcon(self, value):
+        visible = bool(value)
+        if self.showMenuBarIcon == visible:
+            return
+        self._cfg.setdefault("settings", {})["show_menu_bar_icon"] = visible
         save_config(self._cfg)
         self.settingsChanged.emit()
         self.statusMessage.emit("Saved")

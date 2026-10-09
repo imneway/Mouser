@@ -393,6 +393,10 @@ _MACOS_STATUS_ITEM_PARAMS = None
 # before it. A rapid show/hide transition must not let an old delayed callback
 # tear down a newer, working status item.
 _MACOS_STATUS_ITEM_REINSTALL_GENERATION = 0
+# Mirrors the "show_menu_bar_icon" setting. While False the native item is
+# removed and the activation-policy re-install path leaves it removed.
+_MACOS_STATUS_ITEM_WANTED = True
+_MACOS_REOPEN_HANDLER = None
 _MACOS_QUIT_FILTER = None
 _MACOS_SYSTEM_QUIT_REASONS = {
     "quia",  # kAEQuitAll
@@ -537,6 +541,39 @@ else:
     _MacOSStatusItemTarget = None
 
 
+if _MacOSNSObject is not None:
+    try:
+        import objc as _macos_objc  # type: ignore[import-not-found]
+
+        _reopen_selector = _macos_objc.typedSelector(b"v@:@@")
+    except Exception:  # pragma: no cover - PyObjC missing or too old
+        def _reopen_selector(fn):
+            return fn
+
+    class _MacOSReopenHandler(_MacOSNSObject):
+        """Apple-event target for kAEReopenApplication ('rapp').
+
+        LaunchServices sends 'rapp' to the running instance when the user
+        opens Mouser again from Spotlight, Launchpad, Finder or the Dock.
+        Showing the settings window there is what keeps the app reachable
+        while its menu-bar icon is hidden."""
+
+        def setPyHandler_(self, handler):  # type: ignore[override]
+            self._py_handler = handler
+
+        @_reopen_selector
+        def handleReopenEvent_withReplyEvent_(self, event, reply):  # type: ignore[override]
+            handler = getattr(self, "_py_handler", None)
+            if handler is None:
+                return
+            try:
+                handler()
+            except Exception as exc:  # noqa: BLE001
+                print(f"[Mouser] reopen handler raised: {exc}")
+else:
+    _MacOSReopenHandler = None
+
+
 class _MacOSQuitToTrayFilter(QObject):
     """Intercept app-level quit requests and hide the window instead."""
 
@@ -677,7 +714,11 @@ def _schedule_macos_status_item_reinstall() -> None:
     flip. The delayed retry runs only when the immediate attempt failed or
     AppKit subsequently detached the replacement. No-op until a native item
     has first been installed successfully."""
-    if sys.platform != "darwin" or _MACOS_STATUS_ITEM_PARAMS is None:
+    if (
+        sys.platform != "darwin"
+        or _MACOS_STATUS_ITEM_PARAMS is None
+        or not _MACOS_STATUS_ITEM_WANTED
+    ):
         return
     generation = _MACOS_STATUS_ITEM_REINSTALL_GENERATION
     first_attempt_succeeded = False
@@ -686,7 +727,11 @@ def _schedule_macos_status_item_reinstall() -> None:
         return generation == _MACOS_STATUS_ITEM_REINSTALL_GENERATION
 
     def _reinstall() -> bool:
-        if not _is_current() or _MACOS_STATUS_ITEM_PARAMS is None:
+        if (
+            not _is_current()
+            or _MACOS_STATUS_ITEM_PARAMS is None
+            or not _MACOS_STATUS_ITEM_WANTED
+        ):
             return False
         return _install_native_macos_status_item(*_MACOS_STATUS_ITEM_PARAMS) is not None
 
@@ -882,6 +927,80 @@ def _install_native_macos_status_item(qmenu, on_left_click):
     # a later activation-policy change from creating a second icon beside it.
     _MACOS_STATUS_ITEM_PARAMS = (qmenu, on_left_click)
     return status_item
+
+
+def _remove_native_macos_status_item() -> bool:
+    """Take the native item out of the menu bar, keeping the install
+    parameters so it can be re-created later. Returns False if AppKit
+    refused, in which case the retained references are kept so no
+    duplicate item is ever created."""
+    global _MACOS_NATIVE_STATUS_ITEM, _MACOS_NATIVE_STATUS_TARGET
+    if _MACOS_NATIVE_STATUS_ITEM is None:
+        return True
+    appkit = _macos_appkit()
+    if appkit is None:
+        return False
+    try:
+        appkit.NSStatusBar.systemStatusBar().removeStatusItem_(
+            _MACOS_NATIVE_STATUS_ITEM
+        )
+    except Exception as exc:
+        print(f"[Mouser] Failed to remove native status item: {exc}")
+        return False
+    _MACOS_NATIVE_STATUS_ITEM = None
+    _MACOS_NATIVE_STATUS_TARGET = None
+    return True
+
+
+def _set_macos_status_item_wanted(wanted: bool) -> None:
+    """Show or hide the native menu-bar item to match the user setting.
+
+    Bumps the re-install generation so a re-install already scheduled by an
+    activation-policy flip cannot bring a just-hidden icon back. No-op for
+    the item itself when the Qt tray fallback is in use (no native params);
+    the caller toggles the QSystemTrayIcon in that case."""
+    global _MACOS_STATUS_ITEM_WANTED, _MACOS_STATUS_ITEM_REINSTALL_GENERATION
+    if sys.platform != "darwin":
+        return
+    wanted = bool(wanted)
+    if wanted == _MACOS_STATUS_ITEM_WANTED:
+        return
+    _MACOS_STATUS_ITEM_WANTED = wanted
+    _MACOS_STATUS_ITEM_REINSTALL_GENERATION += 1
+    if _MACOS_STATUS_ITEM_PARAMS is None:
+        return
+    if wanted:
+        if not _macos_native_status_item_is_attached():
+            _install_native_macos_status_item(*_MACOS_STATUS_ITEM_PARAMS)
+    else:
+        _remove_native_macos_status_item()
+
+
+def _install_macos_reopen_handler(on_reopen) -> bool:
+    """Route kAEReopenApplication to ``on_reopen`` (shows the settings
+    window). Must run after the Cocoa event loop has started: NSApplication
+    installs its own core Apple-event handlers while finishing launch and
+    would replace one registered earlier."""
+    global _MACOS_REOPEN_HANDLER
+    if sys.platform != "darwin" or _MacOSReopenHandler is None:
+        return False
+    appkit = _macos_appkit()
+    if appkit is None:
+        return False
+    try:
+        handler = _MacOSReopenHandler.alloc().init()
+        handler.setPyHandler_(on_reopen)
+        appkit.NSAppleEventManager.sharedAppleEventManager().setEventHandler_andSelector_forEventClass_andEventID_(
+            handler,
+            b"handleReopenEvent:withReplyEvent:",
+            _four_char_code("aevt"),
+            _four_char_code("rapp"),
+        )
+    except Exception as exc:
+        print(f"[Mouser] Failed to install reopen handler: {exc}")
+        return False
+    _MACOS_REOPEN_HANDLER = handler
+    return True
 
 
 def _qcolor_white():
@@ -1431,7 +1550,31 @@ def main():
         if native_tray is not None:
             tray.setVisible(False)
 
-    if launch_hidden and QSystemTrayIcon.isSystemTrayAvailable():
+        def _apply_menu_bar_icon_setting():
+            # Hiding is only safe while re-opening the app can bring the
+            # window back; without the reopen handler the icon stays.
+            wanted = backend.showMenuBarIcon or _MACOS_REOPEN_HANDLER is None
+            _set_macos_status_item_wanted(wanted)
+            if _MACOS_STATUS_ITEM_PARAMS is None:
+                # Native item unavailable: the Qt tray icon is the menu-bar item.
+                tray.setVisible(wanted)
+
+        def _install_reopen_and_apply_icon_setting():
+            if not _install_macos_reopen_handler(show_main_window):
+                print("[Mouser] Reopen handler unavailable; keeping menu-bar icon")
+            _apply_menu_bar_icon_setting()
+            backend.settingsChanged.connect(_apply_menu_bar_icon_setting)
+
+        # The reopen handler must be registered once the Cocoa event loop
+        # is running (see _install_macos_reopen_handler).
+        QTimer.singleShot(0, _install_reopen_and_apply_icon_setting)
+
+    menu_bar_icon_hidden = sys.platform == "darwin" and not backend.showMenuBarIcon
+    if (
+        launch_hidden
+        and not menu_bar_icon_hidden
+        and QSystemTrayIcon.isSystemTrayAvailable()
+    ):
         _schedule_tray_minimized_notice(tray, locale_mgr)
 
     # ── Run ────────────────────────────────────────────────────

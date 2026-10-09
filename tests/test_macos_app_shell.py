@@ -166,6 +166,7 @@ class MacOSStatusItemReinstallTests(unittest.TestCase):
         "_MACOS_NATIVE_STATUS_TARGET",
         "_MACOS_STATUS_ITEM_PARAMS",
         "_MACOS_STATUS_ITEM_REINSTALL_GENERATION",
+        "_MACOS_STATUS_ITEM_WANTED",
     )
 
     def setUp(self):
@@ -569,6 +570,147 @@ class MacOSQuitAndAccessibilityTests(unittest.TestCase):
             main_qml.QSystemTrayIcon.MessageIcon.Information,
             5000,
         )
+
+
+@unittest.skipIf(main_qml is None, "main_qml / PySide6 not available")
+class MacOSMenuBarIconVisibilityTests(unittest.TestCase):
+    """The "show_menu_bar_icon" setting removes/restores the native item and
+    keeps the activation-policy re-install path from resurrecting it."""
+
+    _global_names = MacOSStatusItemReinstallTests._global_names
+    _attached_status_item = staticmethod(
+        MacOSStatusItemReinstallTests._attached_status_item
+    )
+    _queue_reinstall_callbacks = MacOSStatusItemReinstallTests._queue_reinstall_callbacks
+
+    def setUp(self):
+        MacOSStatusItemReinstallTests.setUp(self)
+        main_qml._MACOS_STATUS_ITEM_WANTED = True
+
+    def _status_bar(self):
+        status_bar = MagicMock(name="status_bar")
+        appkit = SimpleNamespace(
+            NSStatusBar=SimpleNamespace(systemStatusBar=lambda: status_bar)
+        )
+        return status_bar, appkit
+
+    def test_hiding_removes_native_item_but_keeps_reinstall_params(self):
+        item = self._attached_status_item()
+        main_qml._MACOS_NATIVE_STATUS_ITEM = item
+        main_qml._MACOS_STATUS_ITEM_PARAMS = ("menu", lambda: None)
+        status_bar, appkit = self._status_bar()
+
+        with (
+            patch.object(main_qml.sys, "platform", "darwin"),
+            patch.object(main_qml, "_macos_appkit", return_value=appkit),
+        ):
+            main_qml._set_macos_status_item_wanted(False)
+
+        status_bar.removeStatusItem_.assert_called_once_with(item)
+        self.assertIsNone(main_qml._MACOS_NATIVE_STATUS_ITEM)
+        self.assertIsNotNone(main_qml._MACOS_STATUS_ITEM_PARAMS)
+        self.assertFalse(main_qml._MACOS_STATUS_ITEM_WANTED)
+
+    def test_hidden_icon_is_not_reinstalled_after_policy_flip(self):
+        main_qml._MACOS_STATUS_ITEM_PARAMS = ("menu", lambda: None)
+        main_qml._MACOS_STATUS_ITEM_WANTED = False
+        callbacks = []
+        with (
+            patch.object(main_qml.sys, "platform", "darwin"),
+            patch.object(
+                main_qml.QTimer,
+                "singleShot",
+                side_effect=lambda delay, callback: callbacks.append(callback),
+            ),
+            patch.object(main_qml, "_install_native_macos_status_item") as installer,
+        ):
+            main_qml._schedule_macos_status_item_reinstall()
+        self.assertEqual(callbacks, [])
+        installer.assert_not_called()
+
+    def test_hiding_cancels_reinstall_already_scheduled(self):
+        main_qml._MACOS_STATUS_ITEM_PARAMS = ("menu", lambda: None)
+        _, appkit = self._status_bar()
+        with patch.object(main_qml, "_install_native_macos_status_item") as installer:
+            immediate, delayed = self._queue_reinstall_callbacks()
+            with (
+                patch.object(main_qml.sys, "platform", "darwin"),
+                patch.object(main_qml, "_macos_appkit", return_value=appkit),
+            ):
+                main_qml._set_macos_status_item_wanted(False)
+            immediate()
+            delayed()
+        installer.assert_not_called()
+
+    def test_showing_again_reinstalls_detached_item(self):
+        main_qml._MACOS_STATUS_ITEM_PARAMS = ("menu", lambda: None)
+        main_qml._MACOS_STATUS_ITEM_WANTED = False
+        main_qml._MACOS_NATIVE_STATUS_ITEM = None
+        with (
+            patch.object(main_qml.sys, "platform", "darwin"),
+            patch.object(main_qml, "_install_native_macos_status_item") as installer,
+        ):
+            main_qml._set_macos_status_item_wanted(True)
+        installer.assert_called_once_with("menu", ANY)
+
+    def test_unchanged_setting_is_a_no_op(self):
+        main_qml._MACOS_STATUS_ITEM_PARAMS = ("menu", lambda: None)
+        main_qml._MACOS_STATUS_ITEM_REINSTALL_GENERATION = 5
+        with (
+            patch.object(main_qml.sys, "platform", "darwin"),
+            patch.object(main_qml, "_install_native_macos_status_item") as installer,
+        ):
+            main_qml._set_macos_status_item_wanted(True)
+        installer.assert_not_called()
+        self.assertEqual(main_qml._MACOS_STATUS_ITEM_REINSTALL_GENERATION, 5)
+
+    def test_failed_removal_keeps_retained_item(self):
+        item = self._attached_status_item()
+        main_qml._MACOS_NATIVE_STATUS_ITEM = item
+        main_qml._MACOS_STATUS_ITEM_PARAMS = ("menu", lambda: None)
+        status_bar, appkit = self._status_bar()
+        status_bar.removeStatusItem_.side_effect = RuntimeError("nope")
+        with (
+            patch.object(main_qml.sys, "platform", "darwin"),
+            patch.object(main_qml, "_macos_appkit", return_value=appkit),
+            patch("builtins.print"),
+        ):
+            main_qml._set_macos_status_item_wanted(False)
+        self.assertIs(main_qml._MACOS_NATIVE_STATUS_ITEM, item)
+
+
+@unittest.skipIf(main_qml is None, "main_qml / PySide6 not available")
+class MacOSReopenHandlerTests(unittest.TestCase):
+    def setUp(self):
+        original = main_qml._MACOS_REOPEN_HANDLER
+        self.addCleanup(setattr, main_qml, "_MACOS_REOPEN_HANDLER", original)
+
+    def test_noop_off_macos(self):
+        with patch.object(main_qml.sys, "platform", "linux"):
+            self.assertFalse(main_qml._install_macos_reopen_handler(lambda: None))
+
+    @unittest.skipUnless(sys.platform == "darwin", "AppKit is macOS-only")
+    def test_reopen_event_handler_registers_for_rapp_and_calls_back(self):
+        manager = MagicMock(name="NSAppleEventManager")
+        appkit = SimpleNamespace(
+            NSAppleEventManager=SimpleNamespace(
+                sharedAppleEventManager=lambda: manager
+            )
+        )
+        calls = []
+        with patch.object(main_qml, "_macos_appkit", return_value=appkit):
+            self.assertTrue(
+                main_qml._install_macos_reopen_handler(lambda: calls.append(1))
+            )
+        handler, selector, event_class, event_id = (
+            manager.setEventHandler_andSelector_forEventClass_andEventID_.call_args.args
+        )
+        self.assertEqual(selector, b"handleReopenEvent:withReplyEvent:")
+        self.assertEqual(event_class, main_qml._four_char_code("aevt"))
+        self.assertEqual(event_id, main_qml._four_char_code("rapp"))
+        self.assertTrue(handler.respondsToSelector_(b"handleReopenEvent:withReplyEvent:"))
+        handler.handleReopenEvent_withReplyEvent_(None, None)
+        self.assertEqual(calls, [1])
 
 
 if __name__ == "__main__":
