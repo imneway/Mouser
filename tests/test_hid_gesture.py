@@ -3,6 +3,7 @@ import importlib
 import os
 import sys
 import tempfile
+import threading
 import time
 import unittest
 from types import SimpleNamespace
@@ -1498,6 +1499,17 @@ class HidReconnectStormTests(unittest.TestCase):
         start = time.monotonic()
         listener._interruptible_sleep(5)
         self.assertLess(time.monotonic() - start, 0.5)
+
+    def test_interruptible_sleep_is_cut_short_by_device_change(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._running = True
+        threading.Timer(0.2, listener.notify_device_change).start()
+        start = time.monotonic()
+        listener._interruptible_sleep(5)
+        elapsed = time.monotonic() - start
+        self.assertLess(elapsed, 1.0)
+        # the wake flag is consumed so the next backoff sleep is a real one
+        self.assertFalse(listener._wake_event.is_set())
 
 
 if __name__ == "__main__":

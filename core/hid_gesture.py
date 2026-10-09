@@ -1121,6 +1121,7 @@ class HidGestureListener:
         self._last_controls = []   # REPROG_V4 controls from last connection
         self._consecutive_request_timeouts = 0
         self._stray_reply = None   # late reply from another receiver slot, see _request
+        self._wake_event = threading.Event()   # set by notify_device_change()
         # 0x2121 Hi-Res Wheel + 0x2150 Thumbwheel native-invert state.
         # Lock ordering: outer `_wheel_divert_call_lock` serializes
         # cross-thread callers, inner `_wheel_divert_lock` protects the
@@ -3369,11 +3370,21 @@ class HidGestureListener:
 
     def _interruptible_sleep(self, seconds):
         """Sleep up to ``seconds`` in 0.1 s slices, returning early if the
-        listener has been stopped so teardown stays responsive."""
+        listener has been stopped (teardown stays responsive) or if a device
+        change was reported (a freshly plugged receiver gets probed right
+        away instead of after the full reconnect backoff)."""
         for _ in range(int(max(0.0, seconds) / 0.1)):
             if not self._running:
                 return
+            if self._wake_event.is_set():
+                self._wake_event.clear()
+                return
             time.sleep(0.1)
+
+    def notify_device_change(self):
+        """Called by the mouse hook on an OS device-change notification.
+        Cuts the reconnect backoff short so the next probe runs immediately."""
+        self._wake_event.set()
 
     def _main_loop(self):
         """Outer loop: connect → listen → reconnect on error/disconnect."""

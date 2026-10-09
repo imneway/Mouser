@@ -1190,7 +1190,10 @@ class Engine:
                     except Exception:
                         pass
 
-        time.sleep(3)
+        # Short settle between the Smart Shift write and the DPI write. The
+        # device is already answering HID++ at this point; 3 s only delayed
+        # the DPI restore after every reconnect.
+        time.sleep(0.5)
         hg = self.hook._hid_gesture
         if hg is None or getattr(hg, "connected_device", None) is None:
             return False
