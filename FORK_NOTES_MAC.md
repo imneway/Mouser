@@ -78,5 +78,5 @@ PC 端相关资料：PC 安装在 `C:\Program Files\Utilities\Mouser`（计划�
 - Mac 上完整测试：除 5 个上游 master 本来就失败的测试外全过（`test_wheel_divert.MacOSSuppressionTests` 4 个：装了真 PyObjC 时测试替换不了 Quartz；`test_engine` 那个空闲时假失败）。
 - 已装到 `/Applications/Mouser.app`，官方 3.7.3 备份为 `/Applications/Mouser-official-3.7.3.app`；`check_for_updates` 已设为 false；开机自启 LaunchAgent 指向新 app。
 - Mac 上没有 Logi Options+ / Bolt app / G HUB；有 SteerMouse 和 Mos 常驻（用户原有配置，未动）。
-- 构建用 uv 建的 Python 3.12 venv（与上游 CI 一致）：`uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -r requirements.txt`。ad-hoc 签名每次重建都会变，重装后要重新授权「辅助功能」和「输入监控」。
+- 构建用 uv 建的 Python 3.12 venv（与上游 CI 一致）：`uv venv --python 3.12 .venv && uv pip install --python .venv/bin/python -r requirements.txt`。签名已固定：登录钥匙串里有自签名证书「Mouser Local Signing」（SHA-1 603211C0…5A3C，10 年有效），身份写在 gitignored 的 `.env.local`。构建用 `set -a; source .env.local; set +a; ./build_macos_app.sh`，重建后系统授权保持有效；不带 `.env.local` 会退回 ad-hoc 签名，授权又会失效。
 - 提交 8f6c3ef 新增「在菜单栏显示图标」开关（设置页启动选项里，键 `show_menu_bar_icon`，仅 macOS）。关掉后靠 `rapp`（重新打开 app）事件回到设置窗口：聚焦搜索 / 启动台 / 访达再打开一次 Mouser 即可。图标隐藏时退出 Mouser 要先把开关打开，从菜单栏菜单退出（Cmd+Q 只会隐藏窗口）。
