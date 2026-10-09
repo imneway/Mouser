@@ -2905,7 +2905,12 @@ class HidGestureListener:
 
         def _default_priority(info):
             name = (info.get("product_string") or "").lower()
-            return (1 if "receiver" in name else 0, name)
+            # Requests always go out as 20-byte long reports, which only the
+            # long-report collection (usage 0x0002) of a receiver can carry;
+            # probing its short-report collection (usage 0x0001) first just
+            # burns a few seconds of timeouts whenever the cache misses.
+            usage = int(info.get("usage", 0) or 0)
+            return (1 if "receiver" in name else 0, 0 if usage == 0x0002 else 1, name)
 
         # Negate the score so higher match (cached interface) sorts first.
         def _priority(info):

@@ -745,8 +745,10 @@ class HidBoltReceiverTests(unittest.TestCase):
             ):
                 listener._try_connect()
 
-        # After sorting, direct device should be first
+        # After sorting, direct device should be first, then the receiver's
+        # long-report collection (usage 2) before its short-report one.
         self.assertEqual(infos[0]["product_string"], "MX Master 3S")
+        self.assertEqual([i["usage"] for i in infos[1:]], [2, 1])
 
     def test_transport_label_bluetooth_for_direct_connection(self):
         """devIdx 0xFF should produce 'Bluetooth' transport."""
