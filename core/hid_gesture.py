@@ -1122,6 +1122,7 @@ class HidGestureListener:
         self._consecutive_request_timeouts = 0
         self._stray_reply = None   # late reply from another receiver slot, see _request
         self._wake_event = threading.Event()   # set by notify_device_change()
+        self._dpi_reapply_on_wake = None       # DPI whose write failed while the mouse dozed
         # 0x2121 Hi-Res Wheel + 0x2150 Thumbwheel native-invert state.
         # Lock ordering: outer `_wheel_divert_call_lock` serializes
         # cross-thread callers, inner `_wheel_divert_lock` protects the
@@ -1976,9 +1977,13 @@ class HidGestureListener:
             actual = (p[1] << 8 | p[2]) if len(p) >= 3 else dpi
             print(f"[HidGesture] DPI set to {actual}")
             self._dpi_result = True
+            self._dpi_reapply_on_wake = None
         else:
             print("[HidGesture] DPI set FAILED")
             self._dpi_result = False
+            # Usually the mouse dozed off between the connect handshake and
+            # this write; replay it as soon as the device talks to us again.
+            self._dpi_reapply_on_wake = dpi
         self._pending_dpi = None
         self._dpi_event.set()
 
@@ -3476,6 +3481,9 @@ class HidGestureListener:
                                     pass
                             print("[HidGesture] Device woke from sleep")
                             self._on_report(raw)
+                            if self._dpi_reapply_on_wake is not None and self._pending_dpi is None:
+                                print(f"[HidGesture] Re-applying DPI {self._dpi_reapply_on_wake} after wake")
+                                self._pending_dpi = self._dpi_reapply_on_wake
                         continue
 
                     # Apply any queued DPI command

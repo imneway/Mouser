@@ -593,6 +593,29 @@ class HidLateReplyTests(unittest.TestCase):
         )
 
 
+class HidDpiReapplyAfterWakeTests(unittest.TestCase):
+    """A DPI write that fails (mouse dozed off right after connecting) is
+    remembered and queued again when the device wakes."""
+
+    def test_failed_dpi_write_is_remembered_and_cleared_on_success(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._dev = object()
+        listener._dpi_idx = 0x0D
+
+        listener._pending_dpi = 2400
+        with patch.object(listener, "_request", return_value=None), patch("builtins.print"):
+            listener._apply_pending_dpi()
+        self.assertFalse(listener._dpi_result)
+        self.assertEqual(listener._dpi_reapply_on_wake, 2400)
+
+        listener._pending_dpi = 2400
+        ok = (1, 0x0D, 3, hid_gesture.MY_SW, [0x00, 0x09, 0x60])
+        with patch.object(listener, "_request", return_value=ok), patch("builtins.print"):
+            listener._apply_pending_dpi()
+        self.assertTrue(listener._dpi_result)
+        self.assertIsNone(listener._dpi_reapply_on_wake)
+
+
 class HidBroadcastProbeTests(unittest.TestCase):
     """All receiver slots are asked at once; whoever answers is probed first."""
 
