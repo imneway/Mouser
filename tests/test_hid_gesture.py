@@ -496,6 +496,102 @@ class HidRequestTransportFailureTests(unittest.TestCase):
         self.assertEqual(listener._consecutive_request_timeouts, 1)
 
 
+class HidLateReplyTests(unittest.TestCase):
+    """A reply carrying another receiver slot's device index must not be
+    accepted as the answer for the slot currently being probed."""
+
+    @staticmethod
+    def _reply(dev_idx, feat, func, params):
+        # Windows hidapi layout: report-ID stripped, byte 0 = device index
+        return bytes([dev_idx, feat, (func << 4) | hid_gesture.MY_SW, *params])
+
+    def test_request_ignores_reply_from_other_slot_and_records_it(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._dev_idx = 2
+        late = self._reply(1, 0x00, 0, [0x09, 0x00, 0x05])
+        replies = [late]
+
+        with (
+            patch.object(listener, "_tx"),
+            patch.object(listener, "_rx", side_effect=lambda *_a, **_k: replies.pop() if replies else None),
+        ):
+            self.assertIsNone(
+                listener._request(0x00, 0, [0x1B, 0x04, 0x00], timeout_ms=1)
+            )
+
+        self.assertEqual(listener._stray_reply[0], 1)
+        self.assertEqual(listener._stray_reply[3][0], 0x09)
+
+    def test_request_accepts_reply_from_own_slot(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._dev_idx = 1
+        reply = self._reply(1, 0x00, 0, [0x09, 0x00, 0x05])
+
+        with (
+            patch.object(listener, "_tx"),
+            patch.object(listener, "_rx", return_value=reply),
+        ):
+            msg = listener._request(0x00, 0, [0x1B, 0x04, 0x00], timeout_ms=50)
+
+        self.assertIsNotNone(msg)
+        self.assertEqual(msg[4][0], 0x09)
+        self.assertIsNone(listener._stray_reply)
+
+    def test_try_connect_jumps_to_slot_that_answered_late(self):
+        listener = hid_gesture.HidGestureListener()
+        info = {
+            "product_id": 0xC548,
+            "usage_page": 0xFF00,
+            "usage": 0x0001,
+            "source": "hidapi-enumerate",
+            "product_string": "USB Receiver",
+            "path": b"/dev/hidraw-test",
+        }
+        fake_dev = _FakeHidDevice()
+        probes = []
+
+        def fake_find_feature(feature_id, *, timeout_ms=None):
+            if feature_id != hid_gesture.FEAT_REPROG_V4:
+                return None
+            probes.append((listener._dev_idx, timeout_ms))
+            # slot 1 (sleeping mouse) misses its first short probe; its late
+            # answer shows up while slot 2 is being probed
+            if listener._dev_idx == 1:
+                return 0x09 if len(probes) > 1 else None
+            if listener._dev_idx == 2:
+                listener._stray_reply = (1, 0x00, 0, [0x09, 0x00, 0x05])
+            return None
+
+        with (
+            patch.object(listener, "_vendor_hid_infos", return_value=[info]),
+            patch.object(listener, "_find_feature", side_effect=fake_find_feature),
+            patch.object(listener, "_discover_reprog_controls", return_value=[]),
+            patch.object(listener, "_divert", return_value=True),
+            patch.object(listener, "_divert_extras"),
+            patch.object(hid_gesture, "_load_last_device_cache", return_value=None),
+            patch.object(hid_gesture, "_save_last_device_cache"),
+            patch.object(hid_gesture, "HIDAPI_OK", True),
+            patch.object(hid_gesture, "_BACKEND_PREFERENCE", "hidapi"),
+            patch.object(hid_gesture, "_HID_API_STYLE", "hidapi"),
+            patch.object(
+                hid_gesture,
+                "_hid",
+                SimpleNamespace(device=lambda: fake_dev),
+                create=True,
+            ),
+            patch("builtins.print") as print_mock,
+        ):
+            self.assertTrue(listener._try_connect())
+
+        self.assertEqual([p[0] for p in probes], [1, 2, 1])
+        self.assertEqual(probes[2][1], 1500)
+        self.assertEqual(listener._dev_idx, 1)
+        self.assertTrue(
+            any("Late IRoot reply from devIdx=0x01" in " ".join(str(a) for a in c.args)
+                for c in print_mock.call_args_list)
+        )
+
+
 class HidBoltReceiverTests(unittest.TestCase):
     """Tests for Logi Bolt receiver support."""
 

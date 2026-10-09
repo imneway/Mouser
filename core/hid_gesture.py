@@ -1120,6 +1120,7 @@ class HidGestureListener:
         self._connected_device_info = None
         self._last_controls = []   # REPROG_V4 controls from last connection
         self._consecutive_request_timeouts = 0
+        self._stray_reply = None   # late reply from another receiver slot, see _request
         # 0x2121 Hi-Res Wheel + 0x2150 Thumbwheel native-invert state.
         # Lock ordering: outer `_wheel_divert_call_lock` serializes
         # cross-thread callers, inner `_wheel_divert_lock` protects the
@@ -1477,7 +1478,20 @@ class HidGestureListener:
             msg = _parse(raw)
             if msg is None:
                 continue
-            _, r_feat, r_func, r_sw, r_params = msg
+            r_dev, r_feat, r_func, r_sw, r_params = msg
+
+            # A reply that matches our request but carries another receiver
+            # slot's device index is a *late* answer from that slot (typically
+            # a sleeping mouse that woke up after its own probe timed out).
+            # Never attribute it to the slot we are talking to now; remember
+            # it so discovery can jump straight to the right slot.
+            if (
+                r_feat == feat and r_sw == MY_SW and r_func in {func, (func + 1) & 0x0F}
+                and r_dev != self._dev_idx
+                and 1 <= self._dev_idx <= 6 and 1 <= r_dev <= 6
+            ):
+                self._stray_reply = (r_dev, feat, func, list(r_params))
+                continue
 
             # HID++ error (feature-index 0xFF)
             if r_feat == 0xFF:
@@ -3048,7 +3062,24 @@ class HidGestureListener:
             hidpp_name = None
             for idx in idx_order:
                 self._dev_idx = idx
-                fi = self._find_feature(FEAT_REPROG_V4, timeout_ms=400)
+                self._stray_reply = None
+                # A live device answers in <50 ms, but a mouse that went to
+                # sleep (e.g. right after a KVM switch) needs up to ~1 s to
+                # wake up and reply, so give the slot we expect it in longer.
+                probe_ms = 1200 if idx == cached_dev_idx else 400
+                fi = self._find_feature(FEAT_REPROG_V4, timeout_ms=probe_ms)
+                if fi is None and self._stray_reply is not None:
+                    stray_dev, stray_feat, _, stray_params = self._stray_reply
+                    self._stray_reply = None
+                    if (
+                        stray_feat == 0x00 and stray_params and stray_params[0] != 0
+                        and stray_dev in idx_order
+                    ):
+                        print(f"[HidGesture] Late IRoot reply from devIdx=0x{stray_dev:02X} "
+                              f"while probing devIdx=0x{idx:02X}; re-probing it")
+                        idx = stray_dev
+                        self._dev_idx = idx
+                        fi = self._find_feature(FEAT_REPROG_V4, timeout_ms=1500)
                 if fi is not None:
                     reprog_found = True
                     self._feat_idx = fi
