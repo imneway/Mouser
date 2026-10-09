@@ -25,13 +25,13 @@
 
 ## Mac 上值得补的（需要写代码）
 
-### 1. 接收器插拔通知 → `notify_device_change()`（最重要）
+### 1. 接收器插拔通知 → `notify_device_change()`（已完成，见文末「Mac 端进度」，提交 1f1ca3e）
 
-现状：Windows 靠 `core/mouse_hook_windows.py` 里的 `WM_DEVICECHANGE` 调 `hg.notify_device_change()`（见 `_on_device_change`）。**Mac 上没有对应的东西**——`core/mouse_hook_macos.py` 只监听了系统唤醒/屏幕唤醒/切换用户（`_register_wake_observer`），上游文档也写着 Mac 是"HID++ reconnect loop"。
+以下是当初的背景，保留备查。原状：Windows 靠 `core/mouse_hook_windows.py` 里的 `WM_DEVICECHANGE` 调 `hg.notify_device_change()`（见 `_on_device_change`）。**Mac 上没有对应的东西**——`core/mouse_hook_macos.py` 只监听了系统唤醒/屏幕唤醒/切换用户（`_register_wake_observer`），上游文档也写着 Mac 是"HID++ reconnect loop"。
 
-后果：KVM 切到 PC 待了几分钟，Mac 上的重连退避已经涨到 30 s；切回 Mac 时最坏要等 30 s 才开始探测。这正是 PC 上 d2993c3 解决的问题，Mac 还没解决。
+后果：KVM 切到 PC 待了几分钟，Mac 上的重连退避已经涨到 30 s；切回 Mac 时最坏要等 30 s 才开始探测。这正是 PC 上 d2993c3 解决的问题，当时 Mac 还没解决。
 
-建议做法：
+当初的建议做法（已按此实现）：
 - 在 Mac 上监听"罗技设备（VID 0x046D）出现/消失"，回调里只做一件事：`hg.notify_device_change()`。
 - 首选 `IONotificationPortCreate` + `IOServiceAddMatchingNotification`（匹配 `IOHIDDevice` + `VendorID=0x046D`，`kIOFirstMatchNotification` 和 `kIOTerminatedNotification`），挂到一个专用线程的 CFRunLoop 上。这种方式**不打开设备**，不会和 Mouser 自己的 HID 访问抢；回调里要把 iterator 里的对象逐个 `IOObjectRelease` 掉（不 drain 的话下次不会再通知）。
 - 也可以用一个**常驻、全程只建一次**的 `IOHIDManager` + `IOHIDManagerRegisterDeviceMatchingCallback`。千万不要每次重连都新建 manager——上游 issue #238 就是 IOHIDManager 泄漏（见 `MEMORY_LEAK_PLAN.md`、`_close_manager` 注释）。
