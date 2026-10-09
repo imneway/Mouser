@@ -73,6 +73,8 @@ class MouseHook(BaseMouseHook):
         self._session_resign_observer = None
         self._session_activate_observer = None
         self._last_resume_at = 0.0
+        self._device_monitor = None
+        self._last_device_change_log_at = 0.0
         self._init_dispatch_queue(maxsize=512)
         self._dispatch_thread = None
         self._first_event_logged = False
@@ -489,6 +491,53 @@ class MouseHook(BaseMouseHook):
         except Exception as exc:
             print(f"[MouseHook] resume reconnect request failed: {exc}")
 
+    # A receiver exposes several HID interfaces, so one plug/unplug arrives as
+    # a burst of notifications. Log at most once per burst.
+    _DEVICE_CHANGE_LOG_INTERVAL_S = 2.0
+
+    def _on_logitech_device_change(self, arrived):
+        """IOKit saw a Logitech HID interface appear or disappear (e.g. a
+        KVM switching the receiver back to this Mac). Let the HID++ listener
+        re-probe now instead of waiting out its reconnect backoff."""
+        if not self._running:
+            return
+        now = time.monotonic()
+        if now - self._last_device_change_log_at >= self._DEVICE_CHANGE_LOG_INTERVAL_S:
+            self._last_device_change_log_at = now
+            print(
+                "[MouseHook] Logitech device "
+                f"{'connected' if arrived else 'removed'} — re-probing",
+                flush=True,
+            )
+        hg = getattr(self, "_hid_gesture", None)
+        if hg is not None and hasattr(hg, "notify_device_change"):
+            try:
+                hg.notify_device_change()
+            except Exception:
+                pass
+
+    def _start_device_monitor(self):
+        if self._device_monitor is not None:
+            return
+        try:
+            from core.macos_device_monitor import LogitechDeviceMonitor
+
+            monitor = LogitechDeviceMonitor(self._on_logitech_device_change)
+            if monitor.start():
+                self._device_monitor = monitor
+            else:
+                monitor.stop()
+        except Exception as exc:
+            print(f"[MouseHook] device monitor unavailable: {exc}")
+
+    def _stop_device_monitor(self):
+        monitor, self._device_monitor = self._device_monitor, None
+        if monitor is not None:
+            try:
+                monitor.stop()
+            except Exception:
+                pass
+
     def _register_wake_observer(self):
         try:
             from AppKit import NSWorkspace
@@ -623,9 +672,11 @@ class MouseHook(BaseMouseHook):
 
         self._start_hid_listener()
         self._register_wake_observer()
+        self._start_device_monitor()
         return True
 
     def stop(self):
+        self._stop_device_monitor()
         self._unregister_wake_observer()
         self._running = False
         self.abort_button_gesture("stop")
