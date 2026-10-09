@@ -592,6 +592,86 @@ class HidLateReplyTests(unittest.TestCase):
         )
 
 
+class HidBroadcastProbeTests(unittest.TestCase):
+    """All receiver slots are asked at once; whoever answers is probed first."""
+
+    @staticmethod
+    def _reply(dev_idx, feat, func, params):
+        return bytes([dev_idx, feat, (func << 4) | hid_gesture.MY_SW, *params])
+
+    def test_broadcast_probe_collects_answering_slots_and_restores_dev_idx(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._dev_idx = 0xFF
+        replies = [
+            self._reply(1, 0x00, 0, [0x09, 0x00, 0x05]),   # mouse, answers late
+            self._reply(2, 0x00, 0, [0x00, 0x00, 0x00]),   # empty slot: feat idx 0
+            self._reply(3, 0x00, 0, [0x09, 0x00, 0x05]),   # keyboard
+        ]
+        tx = Mock()
+
+        with (
+            patch.object(listener, "_tx", tx),
+            patch.object(listener, "_rx", side_effect=lambda *_a, **_k: replies.pop(0) if replies else None),
+        ):
+            found = listener._broadcast_probe((1, 2, 3, 4, 5, 6), timeout_ms=100)
+
+        self.assertEqual(found, {1: 0x09, 3: 0x09})
+        self.assertEqual(tx.call_count, 6)
+        self.assertEqual(listener._dev_idx, 0xFF)
+
+    def test_broadcast_probe_failure_is_harmless(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._dev_idx = 0xFF
+
+        with patch.object(listener, "_tx", side_effect=OSError("tx boom")):
+            self.assertEqual(listener._broadcast_probe((1, 2), timeout_ms=10), {})
+        self.assertEqual(listener._dev_idx, 0xFF)
+
+    def test_try_connect_probes_answering_slot_first(self):
+        listener = hid_gesture.HidGestureListener()
+        info = {
+            "product_id": 0xC548,
+            "usage_page": 0xFF00,
+            "usage": 0x0001,
+            "source": "hidapi-enumerate",
+            "product_string": "USB Receiver",
+            "path": b"/dev/hidraw-test",
+        }
+        fake_dev = _FakeHidDevice()
+        probes = []
+
+        def fake_find_feature(feature_id, *, timeout_ms=None):
+            if feature_id != hid_gesture.FEAT_REPROG_V4:
+                return None
+            probes.append(listener._dev_idx)
+            return 0x09 if listener._dev_idx == 3 else None
+
+        with (
+            patch.object(listener, "_vendor_hid_infos", return_value=[info]),
+            patch.object(listener, "_broadcast_probe", return_value={3: 0x09}),
+            patch.object(listener, "_find_feature", side_effect=fake_find_feature),
+            patch.object(listener, "_discover_reprog_controls", return_value=[]),
+            patch.object(listener, "_divert", return_value=True),
+            patch.object(listener, "_divert_extras"),
+            patch.object(hid_gesture, "_load_last_device_cache", return_value=None),
+            patch.object(hid_gesture, "_save_last_device_cache"),
+            patch.object(hid_gesture, "HIDAPI_OK", True),
+            patch.object(hid_gesture, "_BACKEND_PREFERENCE", "hidapi"),
+            patch.object(hid_gesture, "_HID_API_STYLE", "hidapi"),
+            patch.object(
+                hid_gesture,
+                "_hid",
+                SimpleNamespace(device=lambda: fake_dev),
+                create=True,
+            ),
+            patch("builtins.print"),
+        ):
+            self.assertTrue(listener._try_connect())
+
+        self.assertEqual(probes, [3])
+        self.assertEqual(listener._dev_idx, 3)
+
+
 class HidBoltReceiverTests(unittest.TestCase):
     """Tests for Logi Bolt receiver support."""
 

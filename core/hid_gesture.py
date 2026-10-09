@@ -1518,6 +1518,41 @@ class HidGestureListener:
 
     # ── feature helpers ───────────────────────────────────────────
 
+    def _broadcast_probe(self, idx_order, timeout_ms=1200):
+        """Ask every receiver slot in `idx_order` for REPROG_V4 at once and
+        collect who answers within `timeout_ms`.
+
+        Replies carry their device index, so a single wait covers all slots
+        and a mouse that needs ~1 s to wake up still makes it, instead of
+        each slot being probed in turn with its own short timeout.
+        Returns {dev_idx: reprog_feature_index} for the slots that answered.
+        """
+        found = {}
+        hi = (FEAT_REPROG_V4 >> 8) & 0xFF
+        lo = FEAT_REPROG_V4 & 0xFF
+        saved_idx = self._dev_idx
+        try:
+            for idx in idx_order:
+                self._dev_idx = idx
+                self._tx(LONG_ID, 0x00, 0, [hi, lo, 0x00])
+            deadline = time.time() + timeout_ms / 1000
+            while time.time() < deadline and len(found) < len(idx_order):
+                raw = self._rx(min(300, timeout_ms))
+                msg = _parse(raw) if raw else None
+                if msg is None:
+                    continue
+                dev, feat, func, sw, params = msg
+                if (
+                    feat == 0x00 and sw == MY_SW and func in (0, 1)
+                    and dev in idx_order and params and params[0] != 0
+                ):
+                    found.setdefault(dev, params[0])
+        except Exception as exc:
+            print(f"[HidGesture] Broadcast probe failed: {exc}")
+        finally:
+            self._dev_idx = saved_idx
+        return found
+
     def _find_feature(self, feature_id, timeout_ms=2000):
         """Use IRoot (feature 0x0000) to discover a feature index.
 
@@ -3058,6 +3093,18 @@ class HidGestureListener:
                 )
             else:
                 idx_order = default_idx_order
+            # Receiver: ask all slots at once so a sleeping mouse gets a full
+            # wake-up window instead of a 400 ms slice, then probe the slots
+            # that answered first.
+            if len(idx_order) > 1:
+                answered = self._broadcast_probe(idx_order)
+                if answered:
+                    print("[HidGesture] Slots answering REPROG_V4 probe: "
+                          + ", ".join(f"0x{i:02X}" for i in answered))
+                    idx_order = (
+                        tuple(i for i in idx_order if i in answered)
+                        + tuple(i for i in idx_order if i not in answered)
+                    )
             reprog_found = False
             hidpp_name = None
             for idx in idx_order:
