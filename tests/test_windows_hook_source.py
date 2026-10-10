@@ -8,7 +8,9 @@ with nothing in the log -- whenever debug mode was on.
 """
 
 from pathlib import Path
+import sys
 import unittest
+from unittest.mock import Mock, patch
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -48,3 +50,28 @@ class DebugLoggingIsRateLimitedTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+@unittest.skipUnless(sys.platform == "win32", "Windows hook only imports on Windows")
+class ResumeRecoveryTests(unittest.TestCase):
+    """Resume from sleep re-probes a disconnected listener right away and
+    asks a connected one to read its settings back; the AUTOMATIC/SUSPEND
+    pair a single wake raises collapses into one pass."""
+
+    def test_resume_notifies_listener_once_per_wake(self):
+        from core import mouse_hook_windows as mhw
+
+        hook = mhw.MouseHook()
+        hook._hid_gesture = Mock()
+        with patch("builtins.print"):
+            self.assertTrue(hook._on_resume())
+            self.assertFalse(hook._on_resume())  # PBT_APMRESUMESUSPEND echo
+        hook._hid_gesture.notify_device_change.assert_called_once_with()
+        hook._hid_gesture.request_state_verify.assert_called_once_with()
+
+    def test_resume_without_listener_is_harmless(self):
+        from core import mouse_hook_windows as mhw
+
+        hook = mhw.MouseHook()
+        with patch("builtins.print"):
+            self.assertFalse(hook._on_resume())

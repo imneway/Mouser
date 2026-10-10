@@ -224,6 +224,9 @@ WM_APP_INJECT_SHIFT_HSCROLL = WM_APP + 3
 
 WM_DEVICECHANGE = 0x0219
 DBT_DEVNODES_CHANGED = 0x0007
+WM_POWERBROADCAST = 0x0218
+PBT_APMRESUMEAUTOMATIC = 0x0012
+PBT_APMRESUMESUSPEND = 0x0007
 
 PostMessageW = windll.user32.PostMessageW
 PostMessageW.argtypes = [wintypes.HWND, c_uint, wintypes.WPARAM, wintypes.LPARAM]
@@ -256,6 +259,7 @@ class MouseHook(BaseMouseHook):
         self._startup_ok = False
         self._prev_raw_buttons = {}
         self._last_rehook_time = 0
+        self._last_resume_time = 0
         # Per-button slide gesture: last cursor position while an owner button
         # is held, to derive per-move deltas from the LL hook's absolute point.
         self._btn_gesture_last_x = 0
@@ -542,6 +546,11 @@ class MouseHook(BaseMouseHook):
                 self._on_device_change()
             return 0
 
+        if msg == WM_POWERBROADCAST:
+            if wParam in (PBT_APMRESUMEAUTOMATIC, PBT_APMRESUMESUSPEND):
+                self._on_resume()
+            return 1
+
         return DefWindowProcW(hwnd, msg, wParam, lParam)
 
     def _process_raw_input(self, lParam):
@@ -717,6 +726,31 @@ class MouseHook(BaseMouseHook):
                 hg.notify_device_change()
             except Exception:
                 pass
+
+    # Resume from sleep. A full wake raises PBT_APMRESUMEAUTOMATIC and often
+    # PBT_APMRESUMESUSPEND right after it; collapse the pair into one pass.
+    _RESUME_DEDUPE_S = 5.0
+
+    def _on_resume(self):
+        now = time.time()
+        if now - self._last_resume_time < self._RESUME_DEDUPE_S:
+            return False
+        self._last_resume_time = now
+        print("[MouseHook] System resumed — re-probing HID++ device")
+        hg = self._hid_gesture
+        if hg is None:
+            return False
+        # Disconnected (receiver re-enumerated or on the other KVM side):
+        # probe now instead of after the backoff. Connected: the handle may
+        # have survived while the mouse lost its settings -- read them back.
+        for name in ("notify_device_change", "request_state_verify"):
+            fn = getattr(hg, name, None)
+            if fn is not None:
+                try:
+                    fn()
+                except Exception:
+                    pass
+        return True
 
     def _reinstall_hook(self):
         if self._hook:
