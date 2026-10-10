@@ -20,6 +20,7 @@
 | 1a06f4c | 优先探测接收器的长报文接口（usage 0x0002） | 缓存失配时省约 3 s |
 | 3b7624e | 刚连上鼠标正好打盹导致 DPI 写失败 → 记下来，鼠标醒来时补写 | 偶尔 DPI 没生效的情况消失 |
 | 2ff8ec1 | 鼠标关电源再开：收到电量广播或醒来时回读 DPI，和上次设置的不一致就补写 DPI + Smart Shift + 按键接管（5 s 限频） | 关开鼠标后不用手动拖 DPI 滑块（**PC 上已安装，尚未实测**） |
+| PC 2026-10-10 | 新增 `HidGestureListener.notify_user_input()`：未连接时指针一动就打断重连退避（已连接时直接返回，2 s 限频）。接在 `BaseMouseHook.note_pointer_activity()` 开头，所以 **Mac 的事件 tap 已经自动带上，不用再接**；Windows 钩子也改为调 `note_pointer_activity()`（跳过注入事件），PC 顺带拿到 Mac 的「闲置 ≥30 s 后回读 DPI」 | PC 睡醒后鼠标沉睡、探测全超时、退避涨到 30 s，动了鼠标还要等——实测近 1 分钟才连上；修后一动鼠标约 1 s |
 
 测试：`python -m unittest tests.test_hid_gesture` 在 Windows 上全过。上游在 Windows 上本来就有 15 个 Linux/macOS 专属测试失败——**在 Mac 上跑一遍完整测试，确认这些在 Mac 上是过的**。`tests.test_engine` 里 `test_battery_poll_skips_smart_shift_reads_while_replay_is_inflight` 在电脑空闲时会假失败（和改动无关）。
 
