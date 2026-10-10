@@ -706,6 +706,40 @@ class HidPowerCycleRestoreTests(unittest.TestCase):
         self.assertIsNone(listener._pending_dpi)
         divert.assert_not_called()
 
+    def test_verify_restores_newest_wanted_dpi_not_stale_ack(self):
+        # 2400 was acknowledged earlier; the user then chose 3600 but that
+        # write failed while the mouse dozed. The read-back must restore 3600.
+        listener = self._listener()
+        listener._dpi_reapply_on_wake = 3600
+        with (
+            patch.object(listener, "_request", return_value=self._dpi_reply(1000)),
+            patch.object(listener, "_divert", return_value=True),
+            patch.object(listener, "_divert_extras"),
+            patch("builtins.print"),
+        ):
+            listener._verify_device_state()
+        self.assertEqual(listener._pending_dpi, 3600)
+
+    def test_device_already_at_newest_wanted_dpi_clears_pending_replay(self):
+        listener = self._listener()
+        listener._dpi_reapply_on_wake = 3600
+        with (
+            patch.object(listener, "_request", return_value=self._dpi_reply(3600)),
+            patch("builtins.print"),
+        ):
+            listener._verify_device_state()
+        self.assertIsNone(listener._pending_dpi)
+        self.assertIsNone(listener._dpi_reapply_on_wake)
+        self.assertEqual(listener._last_dpi_set, 3600)
+
+    def test_verify_yields_to_a_queued_dpi_write(self):
+        listener = self._listener()
+        listener._pending_dpi = 3200
+        with patch.object(listener, "_request") as request:
+            listener._verify_device_state()
+        request.assert_not_called()
+        self.assertEqual(listener._pending_dpi, 3200)
+
     def test_verify_is_rate_limited(self):
         listener = self._listener()
         with (

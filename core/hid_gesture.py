@@ -2060,7 +2060,17 @@ class HidGestureListener:
         """Read back DPI; if it no longer matches what we last wrote, the
         device was power-cycled: restore DPI and Smart Shift and re-arm the
         button diverts."""
-        if self._dpi_idx is None or self._dev is None or self._last_dpi_set is None:
+        if self._dpi_idx is None or self._dev is None:
+            return
+        # A write that failed while the mouse dozed holds the newest wanted
+        # value; never let an older acknowledged one win over it. A write
+        # already queued is applied right after this check anyway.
+        if self._pending_dpi is not None and self._pending_dpi != "read":
+            return
+        expected = self._dpi_reapply_on_wake
+        if expected is None:
+            expected = self._last_dpi_set
+        if expected is None:
             return
         now = time.monotonic()
         if now - self._last_verify_time < 5.0:
@@ -2075,11 +2085,17 @@ class HidGestureListener:
             return
         _, _, _, _, p = resp
         current = (p[1] << 8 | p[2]) if len(p) >= 3 else None
-        if current is None or current == self._last_dpi_set:
+        if current is None:
             return
-        print(f"[HidGesture] Device reports DPI {current}, expected {self._last_dpi_set} "
+        if current == expected:
+            # The device already holds the newest wanted value; a failed
+            # earlier write no longer needs replaying.
+            self._dpi_reapply_on_wake = None
+            self._last_dpi_set = expected
+            return
+        print(f"[HidGesture] Device reports DPI {current}, expected {expected} "
               "-- mouse was power-cycled; restoring settings")
-        self._pending_dpi = self._last_dpi_set
+        self._pending_dpi = expected
         if self._last_smart_shift_req is not None:
             with self._smart_shift_slot_lock:
                 if self._pending_smart_shift is None:
