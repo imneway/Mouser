@@ -21,6 +21,9 @@
 | 3b7624e | 刚连上鼠标正好打盹导致 DPI 写失败 → 记下来，鼠标醒来时补写 | 偶尔 DPI 没生效的情况消失 |
 | 2ff8ec1 | 鼠标关电源再开：收到电量广播或醒来时回读 DPI，和上次设置的不一致就补写 DPI + Smart Shift + 按键接管（5 s 限频） | 关开鼠标后不用手动拖 DPI 滑块（**PC 上已安装，尚未实测**） |
 | PC 2026-10-10 | 新增 `HidGestureListener.notify_user_input()`：未连接时指针一动就打断重连退避（已连接时直接返回，2 s 限频）。接在 `BaseMouseHook.note_pointer_activity()` 开头，所以 **Mac 的事件 tap 已经自动带上，不用再接**；Windows 钩子也改为调 `note_pointer_activity()`（跳过注入事件），PC 顺带拿到 Mac 的「闲置 ≥30 s 后回读 DPI」 | PC 睡醒后鼠标沉睡、探测全超时、退避涨到 30 s，动了鼠标还要等——实测近 1 分钟才连上；修后一动鼠标约 1 s |
+| PC 228a4c1 | Windows 处理 `WM_POWERBROADCAST` 睡醒事件（和 Mac 的 `NSWorkspaceDidWakeNotification` 对等）：未连接 → 立即探测；已连接 → 回读一次 DPI | 睡醒后不再傻等退避；已用假唤醒消息实测触发 |
+| PC c87f1ec | 一轮探测里，接收器的长报文接口（usage 0x0002）打开了但 6 个槽都没应答时，跳过它的短报文接口（0x0001，本来就发不了请求） | 鼠标沉睡时一轮失败探测从 ~9 s 缩到 ~4.5 s，动鼠标后的等待上限也随之减半 |
+| PC dfa1c66 | `_verify_device_state` 5 s 限频内的校验请求改为"延后"而不是"丢弃" | 睡醒那次校验若撞上鼠标还在打盹而超时，几秒后用户动鼠标触发的那次不再被吞掉 |
 
 测试：`python -m unittest tests.test_hid_gesture` 在 Windows 上全过。上游在 Windows 上本来就有 15 个 Linux/macOS 专属测试失败——**在 Mac 上跑一遍完整测试，确认这些在 Mac 上是过的**。`tests.test_engine` 里 `test_battery_poll_skips_smart_shift_reads_while_replay_is_inflight` 在电脑空闲时会假失败（和改动无关）。
 
@@ -39,7 +42,7 @@
 - 放的位置参照 Windows：由 mouse hook 持有、`start()` 里注册、`stop()` 里注销，回调里取 hid listener 的写法照抄 `mouse_hook_windows.py` 的 `_on_device_change`（`hasattr(hg, "notify_device_change")` 那段）。
 - 加一个测试（参照 `tests/test_hid_gesture.py` 里中断退避那个测试，或给 macOS hook 写个 mock 测试），独立一个英文提交。
 
-### 2. 唤醒后顺带校验一次状态（可选，小改）
+### 2. 唤醒后顺带校验一次状态（Windows 已做：228a4c1；Mac 看情况）
 
 Mac 的唤醒处理会 `force_reconnect()`，重连后 engine 会回放设置，一般够了。如果实测发现 Mac 睡醒后 DPI 偶尔不对，可以在 `_resume_recovery_worker` 里加调一次 `hg.request_state_verify()`（2ff8ec1 新增的公开方法）。**没出问题就别加。**
 
