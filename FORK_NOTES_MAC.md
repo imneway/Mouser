@@ -82,4 +82,5 @@ PC 端相关资料：PC 安装在 `C:\Program Files\Utilities\Mouser`（计划�
 - 提交 8f6c3ef 新增「在菜单栏显示图标」开关（设置页启动选项里，键 `show_menu_bar_icon`，仅 macOS）。关掉后靠 `rapp`（重新打开 app）事件回到设置窗口：聚焦搜索 / 启动台 / 访达再打开一次 Mouser 即可。图标隐藏时退出 Mouser 要先把开关打开，从菜单栏菜单退出（Cmd+Q 只会隐藏窗口）。
 - 2026-10-10 实测发现：鼠标会在没有任何链路事件的情况下自己把 DPI 退回 1000（14:46:44 写入 3600 且设备回显确认，几分钟后直接回读是 1000，日志中间没有任何记录）。电量轮询不会触发校验（只有鼠标主动广播才会），而且轮询只在设置窗口打开时跑。提交 6481188 加了「指针闲置 ≥30 s 后再动就回读一次 DPI」（`BaseMouseHook.note_pointer_activity`，macOS 事件 tap 调用），不一致就走 `_verify_device_state` 补写 DPI / Smart Shift / 按键接管。日志关键字：`Device reports DPI 1000, expected 3600 -- mouse was power-cycled; restoring settings`。PC 端可在 `WH_MOUSE_LL` 的 `WM_MOUSEMOVE` 里照样调 `note_pointer_activity()`。
 - 这条补写路径（2ff8ec1 + 6481188）在真机上还没触发过；冷启动时 Mouser 走 hidapi 独占打开鼠标，外部脚本无法同时读写 HID++ 做人工复现，唤醒后重连走 IOKit 非独占时才可以（`core/hid_gesture._MacNativeHidDevice(0xC548, 0xFF00, 0x0001)`）。
+- Codex 对 6481188 的提醒（已知、未改）：事件 tap 分不清指针动作来自哪台设备。若用户同时用触控板，触控板活动会刷新闲置计时（鼠标 DPI 重置后切回鼠标可能不触发校验），也可能在罗技鼠标仍在休眠时发一次回读（2 s 超时，连续 3 次会进入"设备休眠"状态，收到任何 HID++ 报文即恢复）。本机是 Mac mini + KVM 键鼠，没有触控板，先不处理。
 
