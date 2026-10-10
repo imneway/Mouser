@@ -279,6 +279,13 @@ class MouseHook(BaseMouseHook):
             if not self._should_intercept_events():
                 return cg_event
 
+            if event_type in (
+                Quartz.kCGEventMouseMoved,
+                Quartz.kCGEventOtherMouseDragged,
+                Quartz.kCGEventScrollWheel,
+            ):
+                self.note_pointer_activity()
+
             mouse_event = None
             should_block = False
 

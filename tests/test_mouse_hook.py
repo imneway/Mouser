@@ -352,6 +352,39 @@ class MacOSWakeRecoveryTests(unittest.TestCase):
         self.listener.force_reconnect.assert_called_once_with()
 
 
+class BaseMouseHookIdleVerifyTests(unittest.TestCase):
+    """Pointer motion after an idle gap asks the HID++ listener to verify
+    the device still holds the saved DPI (a dozing mouse can lose it)."""
+
+    def _hook(self):
+        hook = BaseMouseHook()
+        hook._hid_gesture = Mock()
+        return hook
+
+    def test_first_motion_and_continuous_motion_do_not_verify(self):
+        hook = self._hook()
+        self.assertFalse(hook.note_pointer_activity(now=100.0))
+        self.assertFalse(hook.note_pointer_activity(now=100.5))
+        self.assertFalse(hook.note_pointer_activity(now=129.0))
+        hook._hid_gesture.request_state_verify.assert_not_called()
+
+    def test_motion_after_idle_gap_requests_one_verify(self):
+        hook = self._hook()
+        hook.note_pointer_activity(now=100.0)
+        self.assertTrue(hook.note_pointer_activity(now=100.0 + hook._IDLE_VERIFY_GAP_S))
+        # the burst of events that follows is continuous motion again
+        self.assertFalse(hook.note_pointer_activity(now=130.1))
+        hook._hid_gesture.request_state_verify.assert_called_once_with()
+
+    def test_missing_or_failing_listener_is_harmless(self):
+        hook = BaseMouseHook()
+        hook.note_pointer_activity(now=100.0)
+        self.assertFalse(hook.note_pointer_activity(now=200.0))
+        hook._hid_gesture = Mock()
+        hook._hid_gesture.request_state_verify.side_effect = RuntimeError("boom")
+        self.assertFalse(hook.note_pointer_activity(now=300.0))
+
+
 class BaseMouseHookDispatchQueueTests(unittest.TestCase):
     def test_enqueue_keeps_queue_bounded_and_drops_oldest(self):
         hook = BaseMouseHook()

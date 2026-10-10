@@ -54,6 +54,7 @@ class BaseMouseHook:
         self._device_connected = False
         self._connection_change_cb = None
         self._battery_notify_cb = None
+        self._last_pointer_activity_at = None
         self.divert_mode_shift = False
         self.divert_dpi_switch = False
         self.wheel_native_invert_active = False
@@ -349,6 +350,32 @@ class BaseMouseHook:
             hid_ready=hid_device is not None,
             connected_device=self._connected_device,
         )
+
+    # Pointer motion resuming after this long a gap means the mouse (and
+    # likely the user) was idle. A Logitech mouse can drop its DPI back to
+    # the firmware default while dozing without the receiver ever
+    # disappearing, so the listener gets one chance to read the DPI back and
+    # restore the saved settings (HidGestureListener.request_state_verify).
+    _IDLE_VERIFY_GAP_S = 30.0
+
+    def note_pointer_activity(self, now=None):
+        """Called by the platform hook on OS pointer motion. Cheap on the hot
+        path: one clock read and a compare; the HID++ read happens on the
+        listener thread and only after an idle gap."""
+        if now is None:
+            now = time.monotonic()
+        last = self._last_pointer_activity_at
+        self._last_pointer_activity_at = now
+        if last is None or now - last < self._IDLE_VERIFY_GAP_S:
+            return False
+        hg = self._hid_gesture
+        if hg is None or not hasattr(hg, "request_state_verify"):
+            return False
+        try:
+            hg.request_state_verify()
+        except Exception:
+            return False
+        return True
 
     def _should_intercept_events(self) -> bool:
         """True only when the platform hook should block, remap, or dispatch
