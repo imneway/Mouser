@@ -686,6 +686,15 @@ class HidPowerCycleRestoreTests(unittest.TestCase):
         divert.assert_called_once()
         divert_extras.assert_called_once()
 
+    def test_verify_within_rate_limit_is_deferred_not_dropped(self):
+        listener = self._listener()
+        listener._last_verify_time = time.monotonic()   # a read-back just ran
+        listener._verify_requested = False
+        with patch.object(listener, "_request") as request:
+            listener._verify_device_state()
+        request.assert_not_called()
+        self.assertTrue(listener._verify_requested)     # loop will retry later
+
     def test_matching_dpi_changes_nothing(self):
         listener = self._listener()
         with (

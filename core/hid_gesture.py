@@ -2039,6 +2039,10 @@ class HidGestureListener:
             return
         now = time.monotonic()
         if now - self._last_verify_time < 5.0:
+            # Too soon after the last read-back: defer rather than drop, so a
+            # verify asked for right after a resume (which may have timed out
+            # on a still-dozing mouse) is not lost once the mouse is awake.
+            self._verify_requested = True
             return
         self._last_verify_time = now
         resp = self._request(self._dpi_idx, 2, [0x00])
