@@ -19,7 +19,7 @@
 | d2993c3 | 新增 `HidGestureListener.notify_device_change()`：系统报告"有设备插拔"时立刻重试，不再等退避（最长 30 s）；连上后写回 DPI 前的等待 3 s → 0.5 s | **PC 上**接收器出现后约 2 s 连上、再 1 s DPI 到位 |
 | 1a06f4c | 优先探测接收器的长报文接口（usage 0x0002） | 缓存失配时省约 3 s |
 | 3b7624e | 刚连上鼠标正好打盹导致 DPI 写失败 → 记下来，鼠标醒来时补写 | 偶尔 DPI 没生效的情况消失 |
-| 2ff8ec1 | 鼠标关电源再开：收到电量广播或醒来时回读 DPI，和上次设置的不一致就补写 DPI + Smart Shift + 按键接管（5 s 限频） | 关开鼠标后不用手动拖 DPI 滑块（**PC 上已安装，尚未实测**） |
+| 2ff8ec1 | 鼠标关电源再开：收到电量广播或醒来时回读 DPI，和上次设置的不一致就补写 DPI + Smart Shift + 按键接管（5 s 限频） | 关开鼠标后不用手动拖 DPI 滑块（**PC 2026-10-10 实测通过**：开机即收到电量广播 → 回读 1000 → 同一秒内补回 3600 + Smart Shift + 按键接管） |
 | PC 2026-10-10 | 新增 `HidGestureListener.notify_user_input()`：未连接时指针一动就打断重连退避（已连接时直接返回，2 s 限频）。接在 `BaseMouseHook.note_pointer_activity()` 开头，所以 **Mac 的事件 tap 已经自动带上，不用再接**；Windows 钩子也改为调 `note_pointer_activity()`（跳过注入事件），PC 顺带拿到 Mac 的「闲置 ≥30 s 后回读 DPI」 | PC 睡醒后鼠标沉睡、探测全超时、退避涨到 30 s，动了鼠标还要等——实测近 1 分钟才连上；修后一动鼠标约 1 s |
 | PC 228a4c1 | Windows 处理 `WM_POWERBROADCAST` 睡醒事件（和 Mac 的 `NSWorkspaceDidWakeNotification` 对等）：未连接 → 立即探测；已连接 → 回读一次 DPI | 睡醒后不再傻等退避；已用假唤醒消息实测触发 |
 | PC c87f1ec | 一轮探测里，接收器的长报文接口（usage 0x0002）打开了但 6 个槽都没应答时，跳过它的短报文接口（0x0001，本来就发不了请求） | 鼠标沉睡时一轮失败探测从 ~9 s 缩到 ~4.5 s，动鼠标后的等待上限也随之减半 |
