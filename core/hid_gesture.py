@@ -1128,6 +1128,7 @@ class HidGestureListener:
         self._last_smart_shift_req = None      # last Smart Shift tuple the device acknowledged
         self._verify_requested = False         # re-check device state (power-cycle detection)
         self._last_verify_time = 0.0
+        self._followup_verify_at = []          # monotonic deadlines armed after each connect
         # 0x2121 Hi-Res Wheel + 0x2150 Thumbwheel native-invert state.
         # Lock ordering: outer `_wheel_divert_call_lock` serializes
         # cross-thread callers, inner `_wheel_divert_lock` protects the
@@ -2024,6 +2025,30 @@ class HidGestureListener:
             self._dpi_result = None
         self._pending_dpi = None
         self._dpi_event.set()
+
+    # A DPI write right after (re)connect can be acknowledged and still not
+    # stick: seen twice on an MX Master 3S behind a KVM, where the mouse
+    # reported the firmware default again 1-2 minutes after the receiver came
+    # back, with no link event in between. Re-check a couple of times after
+    # every connect instead of waiting for the next broadcast or idle gap.
+    _POST_CONNECT_VERIFY_DELAYS_S = (15.0, 150.0)
+
+    def _arm_post_connect_verifies(self, now=None):
+        if now is None:
+            now = time.monotonic()
+        self._followup_verify_at = [now + d for d in self._POST_CONNECT_VERIFY_DELAYS_S]
+
+    def _pop_due_followup_verify(self, now=None):
+        """True once per armed deadline that has passed; the listener loop
+        turns that into a state verify."""
+        if not self._followup_verify_at:
+            return False
+        if now is None:
+            now = time.monotonic()
+        if now < self._followup_verify_at[0]:
+            return False
+        self._followup_verify_at.pop(0)
+        return True
 
     def request_state_verify(self):
         """Ask the listener loop to check whether the device lost its settings
@@ -3511,6 +3536,7 @@ class HidGestureListener:
                 except Exception:
                     pass
             print("[HidGesture] Listening for gesture events…")
+            self._arm_post_connect_verifies()
             _no_data_count = 0          # consecutive _rx() returning None
             _STALE_HOLD_LIMIT = 3       # force-release held buttons after this many empty reads (~3 s)
             _CONSECUTIVE_TIMEOUT_RECONNECT = 3  # force reconnect after this many request timeouts
@@ -3568,6 +3594,9 @@ class HidGestureListener:
                             else:
                                 self._verify_requested = True
                         continue
+
+                    if self._pop_due_followup_verify():
+                        self._verify_requested = True
 
                     # Power-cycle check requested by a link-up broadcast or wake
                     if self._verify_requested:

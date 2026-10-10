@@ -1664,5 +1664,29 @@ class HidReconnectStormTests(unittest.TestCase):
         self.assertFalse(listener._wake_event.is_set())
 
 
+class PostConnectVerifyTests(unittest.TestCase):
+    """After every connect the listener re-checks the device state a couple of
+    times, because a DPI write acknowledged right after reconnect can still be
+    lost a minute or two later."""
+
+    def test_each_armed_deadline_fires_once_in_order(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._arm_post_connect_verifies(now=100.0)
+        first, second = listener._POST_CONNECT_VERIFY_DELAYS_S
+        self.assertFalse(listener._pop_due_followup_verify(now=100.0 + first - 1))
+        self.assertTrue(listener._pop_due_followup_verify(now=100.0 + first))
+        self.assertFalse(listener._pop_due_followup_verify(now=100.0 + first))
+        self.assertTrue(listener._pop_due_followup_verify(now=100.0 + second))
+        self.assertFalse(listener._pop_due_followup_verify(now=100.0 + second + 999))
+
+    def test_reconnect_rearms_from_scratch(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._arm_post_connect_verifies(now=100.0)
+        listener._pop_due_followup_verify(now=1000.0)
+        listener._arm_post_connect_verifies(now=2000.0)
+        self.assertEqual(len(listener._followup_verify_at), len(listener._POST_CONNECT_VERIFY_DELAYS_S))
+        self.assertFalse(listener._pop_due_followup_verify(now=2000.0))
+
+
 if __name__ == "__main__":
     unittest.main()
