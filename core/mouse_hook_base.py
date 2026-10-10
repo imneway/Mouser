@@ -361,9 +361,21 @@ class BaseMouseHook:
     def note_pointer_activity(self, now=None):
         """Called by the platform hook on OS pointer motion. Cheap on the hot
         path: one clock read and a compare; the HID++ read happens on the
-        listener thread and only after an idle gap."""
+        listener thread and only after an idle gap.
+
+        While the listener is disconnected the same motion is the proof
+        that the mouse is awake (a sleeping one answers no probe, so after a
+        system resume the reconnect backoff grows to 30 s): hand it to
+        HidGestureListener.notify_user_input, which gates and rate-limits
+        on its own."""
         if now is None:
             now = time.monotonic()
+        notify = getattr(self._hid_gesture, "notify_user_input", None)
+        if notify is not None:
+            try:
+                notify()
+            except Exception:
+                pass
         last = self._last_pointer_activity_at
         self._last_pointer_activity_at = now
         if last is None or now - last < self._IDLE_VERIFY_GAP_S:

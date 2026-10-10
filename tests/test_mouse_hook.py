@@ -384,6 +384,22 @@ class BaseMouseHookIdleVerifyTests(unittest.TestCase):
         hook._hid_gesture.request_state_verify.side_effect = RuntimeError("boom")
         self.assertFalse(hook.note_pointer_activity(now=300.0))
 
+    def test_every_motion_is_forwarded_as_user_input(self):
+        # The listener gates/rate-limits notify_user_input itself (it only
+        # acts while disconnected), so the hook forwards every event.
+        hook = self._hook()
+        hook.note_pointer_activity(now=100.0)
+        hook.note_pointer_activity(now=100.5)
+        self.assertEqual(hook._hid_gesture.notify_user_input.call_count, 2)
+        hook._hid_gesture.request_state_verify.assert_not_called()
+
+        # a listener without the method (or one that raises) is tolerated
+        hook._hid_gesture = Mock(spec=["request_state_verify"])
+        self.assertFalse(hook.note_pointer_activity(now=101.0))
+        hook._hid_gesture = Mock()
+        hook._hid_gesture.notify_user_input.side_effect = RuntimeError("boom")
+        self.assertFalse(hook.note_pointer_activity(now=101.5))
+
 
 class BaseMouseHookDispatchQueueTests(unittest.TestCase):
     def test_enqueue_keeps_queue_bounded_and_drops_oldest(self):

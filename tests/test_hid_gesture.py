@@ -1593,6 +1593,28 @@ class HidReconnectStormTests(unittest.TestCase):
         # the wake flag is consumed so the next backoff sleep is a real one
         self.assertFalse(listener._wake_event.is_set())
 
+    def test_user_input_cuts_backoff_only_while_disconnected(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._running = True
+
+        # Connected: pointer activity is routine and must not touch the flag.
+        listener._connected = True
+        listener.notify_user_input()
+        self.assertFalse(listener._wake_event.is_set())
+
+        # Disconnected (e.g. after a system resume with the mouse asleep):
+        # the first movement wakes the reconnect loop at once...
+        listener._connected = False
+        start = time.monotonic()
+        threading.Timer(0.2, listener.notify_user_input).start()
+        listener._interruptible_sleep(5)
+        self.assertLess(time.monotonic() - start, 1.0)
+        self.assertFalse(listener._wake_event.is_set())
+
+        # ...and the flood of move events right after it is rate-limited.
+        listener.notify_user_input()
+        self.assertFalse(listener._wake_event.is_set())
+
 
 if __name__ == "__main__":
     unittest.main()

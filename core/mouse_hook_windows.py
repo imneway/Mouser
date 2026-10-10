@@ -316,6 +316,10 @@ class MouseHook(BaseMouseHook):
             data = lParam.contents
             mouse_data = data.mouseData
             flags = data.flags
+            # Real (non-injected) pointer activity: wakes the HID++ reconnect
+            # loop while disconnected and, after an idle gap, re-checks DPI.
+            if not flags & INJECTED_FLAG:
+                self.note_pointer_activity()
             event = None
             should_block = False
 

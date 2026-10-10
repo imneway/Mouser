@@ -1121,7 +1121,8 @@ class HidGestureListener:
         self._last_controls = []   # REPROG_V4 controls from last connection
         self._consecutive_request_timeouts = 0
         self._stray_reply = None   # late reply from another receiver slot, see _request
-        self._wake_event = threading.Event()   # set by notify_device_change()
+        self._wake_event = threading.Event()   # set by notify_device_change()/notify_user_input()
+        self._last_input_wake = 0.0            # monotonic time of the last input-triggered wake
         self._dpi_reapply_on_wake = None       # DPI whose write failed while the mouse dozed
         self._last_dpi_set = None              # last DPI the device acknowledged
         self._last_smart_shift_req = None      # last Smart Shift tuple the device acknowledged
@@ -3439,6 +3440,22 @@ class HidGestureListener:
     def notify_device_change(self):
         """Called by the mouse hook on an OS device-change notification.
         Cuts the reconnect backoff short so the next probe runs immediately."""
+        self._wake_event.set()
+
+    def notify_user_input(self):
+        """Called by the mouse hook on pointer activity. A mouse that was
+        asleep answers no HID++ probe at all, so after a system resume every
+        connect attempt fails and the backoff grows to 30 s. The first
+        movement proves the mouse is awake: cut the backoff short so the
+        next probe runs right away. Cheap enough for the per-move hot path
+        (two attribute reads while connected); rate-limited to one wake per
+        2 s so a probe already in flight isn't followed by a burst of them."""
+        if self._connected:
+            return
+        now = time.monotonic()
+        if now - self._last_input_wake < 2.0:
+            return
+        self._last_input_wake = now
         self._wake_event.set()
 
     def _main_loop(self):
