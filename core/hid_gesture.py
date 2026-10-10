@@ -3010,6 +3010,12 @@ class HidGestureListener:
             if _candidate_cooldown_key(info) in self._reprog_absent_until
         }
         skip_cooled = bool(cooled) and len(cooled) < len(infos)
+        # Receivers whose long-report collection (usage 0x0002) opened fine
+        # this pass but answered no probe. Requests only travel as long
+        # reports, so their short-report collection (usage 0x0001) cannot
+        # succeed either; probing it would just double the time a pass
+        # spends waiting on a mouse that is asleep.
+        long_probed_silent = set()
 
         for info in infos:
             cand_key = _candidate_cooldown_key(info)
@@ -3025,6 +3031,13 @@ class HidGestureListener:
             usage = info.get("usage", 0)
             product = info.get("product_string")
             source = info.get("source", "unknown")
+            if int(usage or 0) == 0x0001 and (pid, product) in long_probed_silent:
+                print(
+                    "[HidGesture] Skipping short-report collection of "
+                    f"PID=0x{int(pid or 0):04X} (its long-report collection "
+                    "answered no probe this pass)"
+                )
+                continue
             # Snapshot before inner branches rebind `info` to HID++ responses.
             candidate_signature = _candidate_signature(info)
             device_spec = resolve_device(product_id=pid, product_name=product)
@@ -3414,6 +3427,8 @@ class HidGestureListener:
                 self._reprog_absent_until[cand_key] = (
                     time.monotonic() + self._REPROG_ABSENT_COOLDOWN_S
                 )
+                if opened_usage == 0x0002 and "receiver" in (product or "").lower():
+                    long_probed_silent.add((pid, product))
 
             # Couldn't use this interface -- close and try next
             try:

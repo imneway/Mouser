@@ -333,6 +333,45 @@ class HidDiscoveryDiagnosticsTests(unittest.TestCase):
         )
         fake_dev.close.assert_called_once_with()
 
+    def test_try_connect_skips_receiver_short_collection_after_silent_long_one(self):
+        # A Bolt receiver with its mouse asleep: the long-report collection
+        # opens but no slot answers. The short-report collection cannot carry
+        # requests at all, so the pass must not spend another round on it.
+        listener = hid_gesture.HidGestureListener()
+        receiver = {
+            "product_id": hid_gesture.BOLT_RECEIVER_PID,
+            "usage_page": 0xFF00,
+            "transport": None,
+            "source": "hidapi-enumerate",
+            "product_string": "USB Receiver",
+        }
+        long_col = dict(receiver, usage=0x0002, path=b"col02")
+        short_col = dict(receiver, usage=0x0001, path=b"col01")
+        opened_paths = []
+
+        def _device():
+            dev = _FakeHidDevice()
+            dev.open_path = Mock(side_effect=opened_paths.append)
+            return dev
+
+        with (
+            patch.object(listener, "_vendor_hid_infos", return_value=[long_col, short_col]),
+            patch.object(listener, "_broadcast_probe", return_value={}),
+            patch.object(listener, "_find_feature", return_value=None),
+            patch.object(hid_gesture, "HIDAPI_OK", True),
+            patch.object(hid_gesture, "_BACKEND_PREFERENCE", "hidapi"),
+            patch.object(hid_gesture, "_HID_API_STYLE", "hidapi"),
+            patch.object(hid_gesture, "_hid", SimpleNamespace(device=_device), create=True),
+            patch("builtins.print") as print_mock,
+        ):
+            self.assertFalse(listener._try_connect())
+
+        self.assertEqual(opened_paths, [b"col02"])
+        self.assertTrue(any(
+            "Skipping short-report collection" in m
+            for m in self._printed_messages(print_mock)
+        ))
+
     def test_try_connect_logs_linux_hid_path_access_before_open(self):
         listener, info = self._make_listener()
         fake_dev = _FakeHidDevice()
