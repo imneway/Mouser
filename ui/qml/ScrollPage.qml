@@ -306,9 +306,28 @@ Item {
                 border.width: 1
                 border.color: scrollPage.theme.border
 
-                // Refreshed from both settingsChanged and profilesChanged (see the
-                // Connections below): adding an app profile must show its row at once.
+                // Refreshed from settingsChanged, profilesChanged and knownAppsChanged
+                // (see the Connections below): adding an app profile must show its
+                // row at once. Replacing the model rebuilds every row, so while a
+                // row's slider is pressed the refresh waits until it is released.
                 property var appRules: backend.precisionDragAppRules
+                property int pressedSliders: 0
+                property bool refreshPending: false
+
+                function refreshRules() {
+                    if (pressedSliders > 0) {
+                        refreshPending = true
+                        return
+                    }
+                    refreshPending = false
+                    appRules = backend.precisionDragAppRules
+                }
+                onPressedSlidersChanged: {
+                    // Deferred: the release handler that brought the count to 0 is
+                    // still running inside the row about to be rebuilt.
+                    if (pressedSliders === 0 && refreshPending)
+                        Qt.callLater(refreshRules)
+                }
 
                 readonly property var modifierModel: backend.precisionDragModifiers.map(function(id) {
                     return { "id": id, "label": s["scroll.precision_drag_mod_" + id] || id }
@@ -583,10 +602,19 @@ Item {
                                         // Commit on release only: a save rebuilds
                                         // this list, which must not happen mid-drag.
                                         onPressedChanged: {
-                                            if (!pressed && Math.round(value) !== modelData.dpi)
+                                            if (pressed) {
+                                                precisionCard.pressedSliders += 1
+                                                return
+                                            }
+                                            if (Math.round(value) !== modelData.dpi)
                                                 backend.setProfilePrecisionDrag(
                                                     modelData.name, "custom",
                                                     modelData.modifier, Math.round(value))
+                                            precisionCard.pressedSliders -= 1
+                                        }
+                                        Component.onDestruction: {
+                                            if (pressed)
+                                                precisionCard.pressedSliders -= 1
                                         }
                                     }
 
@@ -1778,7 +1806,7 @@ Item {
             }
             showMenuBarIconSwitch.checked = backend.showMenuBarIcon
             precisionEnabledSwitch.checked = backend.precisionDragEnabled
-            precisionCard.appRules = backend.precisionDragAppRules
+            precisionCard.refreshRules()
             if (!precisionDpiSlider.pressed) {
                 precisionDpiSlider.value = backend.precisionDragDpi
                 precisionDpiLabel.text = backend.precisionDragDpi + " DPI"
@@ -1789,7 +1817,10 @@ Item {
             ignoreTrackpadSwitch.checked = backend.ignoreTrackpad
         }
         function onProfilesChanged() {
-            precisionCard.appRules = backend.precisionDragAppRules
+            precisionCard.refreshRules()
+        }
+        function onKnownAppsChanged() {
+            precisionCard.refreshRules()
         }
         function onSmartShiftChanged() {
             if (!scrollForceSlider.pressed) {
