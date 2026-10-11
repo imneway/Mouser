@@ -270,7 +270,9 @@ DEFAULT_CONFIG = {
         # Precision drag: hold a modifier key while dragging to drop the
         # sensor to a low DPI, restored on release (fine colour picking etc.).
         "precision_drag_enabled": False,
-        "precision_drag_modifier": "command",
+        # Command on macOS; Ctrl on Windows, where Figma and friends map
+        # Command shortcuts to Ctrl.
+        "precision_drag_modifier": "command" if sys.platform == "darwin" else "control",
         "precision_drag_dpi": 400,
         "hscroll_threshold": 0.1,
         "invert_hscroll": False,  # swap horizontal scroll directions
@@ -578,9 +580,14 @@ def _app_identity_aliases(spec: str) -> set[str]:
 # ``precision_drag`` dict: {"mode": "inherit" | "off" | "custom",
 # "modifier": <PRECISION_DRAG_MODIFIERS>, "dpi": int}. ``inherit`` (or no
 # dict at all) follows the global rule, ``off`` disables it for that app.
-PRECISION_DRAG_MODIFIERS = ("command", "option", "control", "shift", "function")
+# macOS offers its own modifier names, Windows the PC ones; a config carried
+# across (or a default written by the other platform) is still accepted and
+# each hook maps the foreign names onto the closest key.
+PRECISION_DRAG_MAC_MODIFIERS = ("command", "option", "control", "shift", "function")
+PRECISION_DRAG_WINDOWS_MODIFIERS = ("control", "alt", "shift", "win")
+PRECISION_DRAG_MODIFIERS = PRECISION_DRAG_MAC_MODIFIERS + ("alt", "win")
 PRECISION_DRAG_MODES = ("inherit", "off", "custom")
-PRECISION_DRAG_DEFAULT_MODIFIER = "command"
+PRECISION_DRAG_DEFAULT_MODIFIER = DEFAULT_CONFIG["settings"]["precision_drag_modifier"]
 PRECISION_DRAG_DEFAULT_DPI = 400
 
 

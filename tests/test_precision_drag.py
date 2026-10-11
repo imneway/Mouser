@@ -13,6 +13,7 @@ import core
 from core import hid_gesture
 from core.config import (
     DEFAULT_CONFIG,
+    PRECISION_DRAG_DEFAULT_MODIFIER,
     get_global_precision_drag,
     get_precision_drag_for_profile,
     get_profile_precision_drag,
@@ -29,14 +30,21 @@ def _cfg(**settings):
 
 
 class PrecisionDragConfigTests(unittest.TestCase):
-    def test_defaults_are_off_command_400(self):
+    def test_defaults_are_off_platform_modifier_400(self):
         rule = get_global_precision_drag(copy.deepcopy(DEFAULT_CONFIG))
-        self.assertEqual(rule, {"enabled": False, "modifier": "command", "dpi": 400})
+        self.assertEqual(
+            rule, {"enabled": False, "modifier": PRECISION_DRAG_DEFAULT_MODIFIER, "dpi": 400}
+        )
+        # Command on macOS, Ctrl on Windows (where Command shortcuts live).
+        self.assertEqual(
+            PRECISION_DRAG_DEFAULT_MODIFIER,
+            "command" if sys.platform == "darwin" else "control",
+        )
 
     def test_bad_values_fall_back_to_defaults(self):
         cfg = _cfg(precision_drag_modifier="hyper", precision_drag_dpi="fast")
         rule = get_global_precision_drag(cfg)
-        self.assertEqual(rule["modifier"], "command")
+        self.assertEqual(rule["modifier"], PRECISION_DRAG_DEFAULT_MODIFIER)
         self.assertEqual(rule["dpi"], 400)
 
     def test_profile_without_override_inherits_global(self):
@@ -352,7 +360,7 @@ class PrecisionDragEngineTests(unittest.TestCase):
         set_profile_precision_drag(cfg, "figma", "custom", modifier="option", dpi=250)
         engine = self._engine(cfg)
         enabled, modifier, dpi, provider = engine.hook.precision_calls[-1]
-        self.assertEqual((enabled, modifier, dpi), (True, "command", 400))
+        self.assertEqual((enabled, modifier, dpi), (True, PRECISION_DRAG_DEFAULT_MODIFIER, 400))
         self.assertEqual(provider(), 3600)
 
         engine._switch_profile("figma")

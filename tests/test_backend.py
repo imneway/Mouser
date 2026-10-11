@@ -8,7 +8,7 @@ import unittest.mock
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from core.config import DEFAULT_CONFIG
+from core.config import DEFAULT_CONFIG, PRECISION_DRAG_DEFAULT_MODIFIER
 from core.updater import UpdateCheckState
 
 try:
@@ -1507,7 +1507,7 @@ class BackendLoginStartupTests(unittest.TestCase):
         ):
             backend = Backend(engine=None)
             self.assertFalse(backend.precisionDragEnabled)
-            self.assertEqual(backend.precisionDragModifier, "command")
+            self.assertEqual(backend.precisionDragModifier, PRECISION_DRAG_DEFAULT_MODIFIER)
             self.assertEqual(backend.precisionDragDpi, 400)
             self.assertEqual(backend.precisionDragAppRules[0]["mode"], "inherit")
 

@@ -329,8 +329,10 @@ Item {
                         Qt.callLater(refreshRules)
                 }
 
+                readonly property string modifierLabelPrefix: backend.isWindows
+                    ? "scroll.precision_drag_winmod_" : "scroll.precision_drag_mod_"
                 readonly property var modifierModel: backend.precisionDragModifiers.map(function(id) {
-                    return { "id": id, "label": s["scroll.precision_drag_mod_" + id] || id }
+                    return { "id": id, "label": s[precisionCard.modifierLabelPrefix + id] || id }
                 })
                 readonly property var modeModel: backend.precisionDragModes.map(function(id) {
                     return { "id": id, "label": s["scroll.precision_drag_mode_" + id] || id }

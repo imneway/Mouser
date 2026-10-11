@@ -59,6 +59,10 @@ _PRECISION_FLAG_MASKS = {
     "option": 1 << 19,     # kCGEventFlagMaskAlternate
     "command": 1 << 20,    # kCGEventFlagMaskCommand
     "function": 1 << 23,   # kCGEventFlagMaskSecondaryFn
+    # Windows names, should a config travel: Alt sits where Option is, the
+    # Win key where Command is.
+    "alt": 1 << 19,
+    "win": 1 << 20,
 }
 _kCGEventTapDisabledByTimeout = 0xFFFFFFFE
 _kCGEventTapDisabledByUserInput = 0xFFFFFFFF

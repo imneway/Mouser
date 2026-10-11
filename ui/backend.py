@@ -23,6 +23,7 @@ from core.config import (
     get_icon_for_exe, HAPTIC_ELIGIBLE_ACTIONS, set_action_haptic,
     set_button_haptic,
     GESTURE_SWIPE_ACTION, SWIPE_CAPABLE_BUTTONS, GESTURE_SWIPE_DIRECTIONS,
+    PRECISION_DRAG_MAC_MODIFIERS, PRECISION_DRAG_WINDOWS_MODIFIERS,
     PRECISION_DRAG_MODIFIERS, PRECISION_DRAG_MODES,
     get_global_precision_drag, get_profile_precision_drag,
     set_profile_precision_drag,
@@ -850,12 +851,15 @@ class Backend(QObject):
     @Property(bool, constant=True)
     def supportsPrecisionDrag(self):
         # Needs the platform hook to report primary-button drags with
-        # modifier state; wired on macOS (listen-only CGEventTap).
-        return sys.platform == "darwin"
+        # modifier state: macOS (listen-only CGEventTap) and Windows
+        # (WH_MOUSE_LL + GetAsyncKeyState).
+        return sys.platform in ("darwin", "win32")
 
     @Property(list, constant=True)
     def precisionDragModifiers(self):
-        return list(PRECISION_DRAG_MODIFIERS)
+        if sys.platform.startswith("win"):
+            return list(PRECISION_DRAG_WINDOWS_MODIFIERS)
+        return list(PRECISION_DRAG_MAC_MODIFIERS)
 
     @Property(list, constant=True)
     def precisionDragModes(self):
