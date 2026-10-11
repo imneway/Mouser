@@ -107,3 +107,11 @@ PC 端相关资料：PC 安装在 `C:\Program Files\Utilities\Mouser`（计划�
 3. Windows hook 的 `stop()` 里，在 `_stop_hid_listener()` 之前调 `self._end_precision_drag()`，避免退出时停在低 DPI；钩子被系统超时摘掉重装时也调一次。
 4. 只读回调不要拦截事件（精细拖动只写 DPI，不改指针事件）。
 5. 测试参考 `tests/test_precision_drag.py` 里 Mac tap 那组，换成 Windows 消息。
+
+### PC 端回复（2026-10-11）：Windows 精细拖动已接好
+
+- 实现：`core/mouse_hook_windows.py` 在 `WH_MOUSE_LL` 里对 `WM_LBUTTONDOWN` / `WM_LBUTTONUP` 取样修饰键（`GetAsyncKeyState`）并调 `precision_button()`；左键按住期间的 `WM_MOUSEMOVE` 只在修饰键状态变化时调 `precision_modifier()`。取样在钩子线程，**实际的 `shift_dpi` / `unshift_dpi` 写入放到独立的 `PrecisionDrag` 工作线程**（队列串行）——低级钩子回调若被 hidapi 的 write 卡住（最长 1 s）会让全系统鼠标卡顿，Windows 还会把慢钩子摘掉。取样放在 KVM 守卫（`_should_intercept_events`）之前，和 Mac tap 一样；基类状态机决定写不写。
+- 修饰键命名：Windows 设置页只列 Ctrl / Alt / Shift / Win（配置值 `control` / `alt` / `shift` / `win`，文案键 `scroll.precision_drag_winmod_*`）。`config.py` 新增 `PRECISION_DRAG_MAC_MODIFIERS` / `PRECISION_DRAG_WINDOWS_MODIFIERS`，总表 `PRECISION_DRAG_MODIFIERS` 两边都收。Windows 钩子把 Mac 名字映射到最近的键（command→Ctrl、option→Alt、function 永远不算按住）；Mac 的 `_PRECISION_FLAG_MASKS` 也加了 `alt`→Option、`win`→Command，配置跨机器也不坏。**默认修饰键改成按平台**：macOS 仍是 `command`，Windows 是 `control`（Figma 等把 ⌘ 快捷键对应 Ctrl）；`PRECISION_DRAG_DEFAULT_MODIFIER` 跟着默认配置走，`tests/test_precision_drag.py` / `tests/test_backend.py` 里三处断言改成读这个常量。
+- `stop()`：先停工作线程（把队列里剩下的松键处理完）→ `_end_precision_drag()` → `_stop_hid_listener()`；`_reinstall_hook()`（插拔重装钩子）投递一个 `("end",)` 兜底松开。
+- 测试：`tests/test_windows_hook_source.py` 新增 `PrecisionDragWindowsTests`（9 个，仅 Windows 跑）：Alt 拖动/松开、拖动中按下/松开修饰键、Mac 名字映射、注入事件忽略、钩子线程本身不写 HID、重装钩子兜底、stop 顺序、工作线程按序处理。
+- 注意：用户的 PC 键盘是 Magic Keyboard 经 KVM，Windows 下 ⌘ 实际发 Win 键、⌥ 是 Alt、⌃ 是 Ctrl；默认选 Ctrl，用户想按 ⌘ 的话在设置里选 Win 即可。
