@@ -30,6 +30,8 @@ from core.mouse_hook_types import MouseEvent, hscroll_event_type
 
 WH_MOUSE_LL = 14
 WM_MOUSEMOVE = 0x0200
+WM_LBUTTONDOWN = 0x0201
+WM_LBUTTONUP = 0x0202
 WM_XBUTTONDOWN = 0x020B
 WM_XBUTTONUP = 0x020C
 WM_MBUTTONDOWN = 0x0207
@@ -93,6 +95,23 @@ GetAsyncKeyState.argtypes = [c_int]
 GetAsyncKeyState.restype = ctypes.c_short
 
 VK_SHIFT = 0x10
+VK_CONTROL = 0x11
+VK_MENU = 0x12
+VK_LWIN = 0x5B
+VK_RWIN = 0x5C
+
+# Precision-drag modifier -> virtual keys sampled with GetAsyncKeyState. The
+# macOS names map onto the closest PC key so a config written there still
+# works; "function" cannot be read on Windows and never counts as held.
+_PRECISION_VKS = {
+    "control": (VK_CONTROL,),
+    "command": (VK_CONTROL,),
+    "alt": (VK_MENU,),
+    "option": (VK_MENU,),
+    "shift": (VK_SHIFT,),
+    "win": (VK_LWIN, VK_RWIN),
+    "function": (),
+}
 
 WM_QUIT = 0x0012
 INJECTED_FLAG = 0x00000001
@@ -260,6 +279,12 @@ class MouseHook(BaseMouseHook):
         self._prev_raw_buttons = {}
         self._last_rehook_time = 0
         self._last_resume_time = 0
+        # Precision drag: button/modifier samples taken in the LL hook are
+        # handed to a worker so the HID++ write never stalls the hook
+        # callback (Windows drops a slow low-level hook for everyone).
+        self._precision_vks = _PRECISION_VKS["control"]
+        self._precision_queue = queue.Queue()
+        self._precision_thread = None
         # Per-button slide gesture: last cursor position while an owner button
         # is held, to derive per-move deltas from the LL hook's absolute point.
         self._btn_gesture_last_x = 0
@@ -346,6 +371,22 @@ class MouseHook(BaseMouseHook):
 
             if flags & INJECTED_FLAG:
                 return CallNextHookEx(self._hook, nCode, wParam, lParam)
+
+            # ── Precision drag: primary button + modifier samples ─────────
+            # Tracked even while the rule is off or no device is bound so a
+            # drag spanning an enable / reconnect is never taken for a fresh
+            # press; the base state machine decides whether a DPI write goes
+            # out, on the precision worker thread.
+            if wParam == WM_LBUTTONDOWN:
+                self._precision_queue.put(("button", True, self._precision_modifier_down()))
+            elif wParam == WM_LBUTTONUP:
+                self._precision_queue.put(("button", False, self._precision_modifier_down()))
+            elif wParam == WM_MOUSEMOVE and self._precision_button_down:
+                # Modifier pressed / let go mid-drag. precision_modifier()
+                # ignores an unchanged sample, but keep the queue quiet too.
+                held = self._precision_modifier_down()
+                if held != self._precision_modifier_held:
+                    self._precision_queue.put(("modifier", held))
 
             # KVM / cold-start guard: when no Logitech is currently bound to
             # this host, the WH_MOUSE_LL hook must be a complete pass-through.
@@ -488,6 +529,53 @@ class MouseHook(BaseMouseHook):
                     return 1
 
         return CallNextHookEx(self._hook, nCode, wParam, lParam)
+
+    # ── Precision drag ───────────────────────────────────────────────────
+    def configure_precision_drag(self, enabled, modifier="command", dpi=400,
+                                 base_dpi_provider=None):
+        self._precision_vks = _PRECISION_VKS.get(modifier, _PRECISION_VKS["control"])
+        super().configure_precision_drag(
+            enabled, modifier=modifier, dpi=dpi, base_dpi_provider=base_dpi_provider
+        )
+
+    def _precision_modifier_down(self):
+        for vk in self._precision_vks:
+            if GetAsyncKeyState(vk) & 0x8000:
+                return True
+        return False
+
+    def _process_precision_item(self, item):
+        if item[0] == "button":
+            self.precision_button(item[1], item[2])
+        elif item[0] == "modifier":
+            self.precision_modifier(item[1])
+        elif item[0] == "end":
+            self._end_precision_drag()
+
+    def _precision_worker(self):
+        while True:
+            item = self._precision_queue.get()
+            if item is None:
+                return
+            try:
+                self._process_precision_item(item)
+            except Exception as exc:
+                print(f"[MouseHook] precision worker error: {exc}")
+
+    def _start_precision_worker(self):
+        if self._precision_thread and self._precision_thread.is_alive():
+            return
+        self._precision_thread = threading.Thread(
+            target=self._precision_worker, daemon=True, name="PrecisionDrag"
+        )
+        self._precision_thread.start()
+
+    def _stop_precision_worker(self):
+        thread, self._precision_thread = self._precision_thread, None
+        if thread is None:
+            return
+        self._precision_queue.put(None)
+        thread.join(timeout=2)
 
     def _get_device_name(self, hDevice):
         if hDevice in self._device_name_cache:
@@ -753,6 +841,8 @@ class MouseHook(BaseMouseHook):
         return True
 
     def _reinstall_hook(self):
+        # A release may have been missed while the hook was off.
+        self._precision_queue.put(("end",))
         if self._hook:
             UnhookWindowsHookEx(self._hook)
             self._hook = None
@@ -787,6 +877,7 @@ class MouseHook(BaseMouseHook):
         if not self._startup_ok:
             return False
         self._start_hid_listener()
+        self._start_precision_worker()
         self._dispatch_worker_thread = threading.Thread(
             target=self._dispatch_worker,
             daemon=True,
@@ -798,6 +889,9 @@ class MouseHook(BaseMouseHook):
     def stop(self):
         self._running = False
         self.abort_button_gesture("stop")
+        # Restore the DPI of a drag in progress while HID++ is still up.
+        self._stop_precision_worker()
+        self._end_precision_drag()
         self._stop_hid_listener()
         self._connected_device = None
         if self._dispatch_worker_thread:
