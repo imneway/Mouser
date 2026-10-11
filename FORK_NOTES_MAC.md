@@ -91,3 +91,19 @@ PC 端相关资料：PC 安装在 `C:\Program Files\Utilities\Mouser`（计划�
 
 - 提交 1541654：校验补写一律用最新设定的 DPI（Codex 审查发现旧的已确认值可能盖掉新值）。
 - 2026-10-11 提交 879b71b + f82e105 新增「精细拖动」（设置页指针速度卡片下方，仅 macOS，键 `precision_drag_enabled` / `precision_drag_modifier` / `precision_drag_dpi`，默认关 / Command / 400）：按住修饰键用左键拖动时立即把鼠标写成低 DPI，松开左键或修饰键立即写回设定 DPI。实现要点：HID++ 监听线程会在 `_rx()` 里阻塞最多 1 s，所以 `shift_dpi` / `unshift_dpi` 直接在事件 tap 线程用 `_tx`（有锁）发 setSensorDpi、不等回复，且用独立的 software-id `SHIFT_SW`，避免回复或错误被监听线程当成自己请求的答案；shift 期间 `_verify_device_state` 不动作，unshift 后 2 s 安排一次回读兜底。Mac 侧是第二个只监听的 CGEventTap（左键按下/抬起/拖动 + flagsChanged），不碰原来那个主 tap。按应用：「鼠标」页建的应用配置档各有一行覆盖（跟随全局 / 关闭 / 自定义修饰键+DPI），存在 profile 的 `precision_drag` 字典里，引擎在切换配置档时下发。日志关键字：`[HidGesture] Precision drag: DPI -> 400` / `DPI -> 3600 (restored)`。已知：触控板的左键拖动也会触发（事件 tap 分不清设备），本机无触控板不处理；Windows 端要自己在 WH_MOUSE_LL 里喂 `precision_button()` / `precision_modifier()`。用户机器上已把该功能打开（Command / 400）。
+- 173ac6d / 下一提交：精细拖动的按应用列表在新建配置档后立即刷新（原来只听 settingsChanged）；某行 DPI 滑块按住时推迟刷新，松手提交后再重建列表。
+
+### 给 PC 端：同步精细拖动要做的事
+
+核心层（config / hid_gesture / mouse_hook_base / engine / backend / QML / 文案）已经跨平台，PC 拉代码后直接可用，只差 Windows 的输入接线：
+
+1. `ui/backend.py` 的 `supportsPrecisionDrag` 目前只在 darwin 返回 True，Windows 接好后改成 darwin + win32（设置卡片靠它显示）。
+2. `core/mouse_hook_windows.py` 的 `WH_MOUSE_LL` 回调里，`_should_intercept_events()` 之后：
+   - `WM_LBUTTONDOWN` → `self.precision_button(True, <修饰键是否按住>)`
+   - `WM_LBUTTONUP` → `self.precision_button(False, <同上>)`
+   - `WM_MOUSEMOVE` 且左键按住 → `self.precision_modifier(<同上>)`
+   - 修饰键状态用 `GetAsyncKeyState`：command→VK_CONTROL（Windows 上建议把 "command" 解释为 Ctrl，或在 UI 里另给 Win 键选项），option→VK_MENU，control→VK_CONTROL，shift→VK_SHIFT；function 在 Windows 上读不到，忽略。
+   - 只松修饰键不动鼠标的情况：可在已有键盘钩子（如有）里调 `precision_modifier()`，没有也行，下一次移动/松键就会恢复。
+3. Windows hook 的 `stop()` 里，在 `_stop_hid_listener()` 之前调 `self._end_precision_drag()`，避免退出时停在低 DPI；钩子被系统超时摘掉重装时也调一次。
+4. 只读回调不要拦截事件（精细拖动只写 DPI，不改指针事件）。
+5. 测试参考 `tests/test_precision_drag.py` 里 Mac tap 那组，换成 Windows 消息。
