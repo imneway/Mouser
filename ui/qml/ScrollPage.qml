@@ -306,6 +306,10 @@ Item {
                 border.width: 1
                 border.color: scrollPage.theme.border
 
+                // Refreshed from both settingsChanged and profilesChanged (see the
+                // Connections below): adding an app profile must show its row at once.
+                property var appRules: backend.precisionDragAppRules
+
                 readonly property var modifierModel: backend.precisionDragModifiers.map(function(id) {
                     return { "id": id, "label": s["scroll.precision_drag_mod_" + id] || id }
                 })
@@ -469,7 +473,7 @@ Item {
 
                     Text {
                         width: parent.width
-                        text: backend.precisionDragAppRules.length === 0
+                        text: precisionCard.appRules.length === 0
                               ? s["scroll.precision_drag_per_app_empty"]
                               : s["scroll.precision_drag_per_app_desc"]
                         font {
@@ -481,7 +485,7 @@ Item {
                     }
 
                     Repeater {
-                        model: backend.precisionDragAppRules
+                        model: precisionCard.appRules
 
                         delegate: Rectangle {
                             required property var modelData
@@ -1774,6 +1778,7 @@ Item {
             }
             showMenuBarIconSwitch.checked = backend.showMenuBarIcon
             precisionEnabledSwitch.checked = backend.precisionDragEnabled
+            precisionCard.appRules = backend.precisionDragAppRules
             if (!precisionDpiSlider.pressed) {
                 precisionDpiSlider.value = backend.precisionDragDpi
                 precisionDpiLabel.text = backend.precisionDragDpi + " DPI"
@@ -1782,6 +1787,9 @@ Item {
             vscrollSwitch.checked = backend.invertVScroll
             hscrollSwitch.checked = backend.invertHScroll
             ignoreTrackpadSwitch.checked = backend.ignoreTrackpad
+        }
+        function onProfilesChanged() {
+            precisionCard.appRules = backend.precisionDragAppRules
         }
         function onSmartShiftChanged() {
             if (!scrollForceSlider.pressed) {
