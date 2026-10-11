@@ -2067,6 +2067,7 @@ class HidGestureListener:
         ok = self._write_dpi_now(dpi)
         if ok:
             self._dpi_shift_active = int(dpi)
+            print(f"[HidGesture] Precision drag: DPI -> {int(dpi)}")
         return ok
 
     def unshift_dpi(self, base_dpi):
@@ -2074,6 +2075,8 @@ class HidGestureListener:
         read-back so a lost restore is corrected within seconds."""
         self._dpi_shift_active = None
         ok = self._write_dpi_now(base_dpi)
+        print(f"[HidGesture] Precision drag: DPI -> {int(base_dpi)} "
+              f"({'restored' if ok else 'restore failed, verify pending'})")
         self._arm_followup_verify(self._UNSHIFT_VERIFY_DELAY_S)
         return ok
 
