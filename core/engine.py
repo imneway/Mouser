@@ -14,6 +14,7 @@ from core.key_simulator import (
 )
 from core.config import (
     load_config, get_active_mappings, get_profile_for_app_identity,
+    get_precision_drag_for_profile,
     BUTTON_TO_EVENTS, BUTTON_HOLD_EVENTS, SWIPE_SET_FOR_TAP,
     save_config, action_haptic_enabled, button_haptic_enabled,
     WHEEL_DIVERT_OFF, coerce_wheel_divert_setting,
@@ -172,6 +173,7 @@ class Engine:
         if hasattr(self.hook, "ignore_trackpad"):
             self.hook.ignore_trackpad = settings.get("ignore_trackpad", True)
         self.hook.debug_mode = self._debug_events_enabled
+        self._configure_precision_drag()
         ring_btn_key = next(
             (k for k, v in mappings.items()
              if isinstance(v, str) and v == "activate_actions_ring"),
@@ -939,6 +941,27 @@ class Engine:
             0.01,
             float(self.cfg.get("settings", {}).get("hscroll_threshold", 1)),
         )
+
+    def _base_dpi(self):
+        """The DPI to restore after a precision drag: the saved setting."""
+        return self.cfg.get("settings", {}).get("dpi", 1000)
+
+    def _configure_precision_drag(self):
+        configure = getattr(self.hook, "configure_precision_drag", None)
+        if configure is None:
+            return
+        profile = self.cfg.get("active_profile", "default")
+        rule = get_precision_drag_for_profile(self.cfg, profile)
+        dpi = clamp_dpi(rule["dpi"], self.connected_device)
+        try:
+            configure(
+                enabled=rule["enabled"],
+                modifier=rule["modifier"],
+                dpi=dpi,
+                base_dpi_provider=self._base_dpi,
+            )
+        except Exception as exc:
+            print(f"[Engine] precision drag configure failed: {exc}")
 
     # ------------------------------------------------------------------
     # Per-app auto-switching

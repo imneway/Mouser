@@ -915,6 +915,7 @@ _UNDIVERT_BUTTON    = 0x02  # 0x02 only         -- revert button-only divert
 _UNDIVERT_RAW_XY    = 0x22  # 0x02 | 0x20       -- revert rawXY divert
 
 MY_SW          = 0x0A        # arbitrary software-id used in our requests
+SHIFT_SW       = 0x0B        # software-id of fire-and-forget precision-drag DPI writes
 
 HIDPP_ERROR_NAMES = {
     0x01: "UNKNOWN",
@@ -1129,6 +1130,9 @@ class HidGestureListener:
         self._verify_requested = False         # re-check device state (power-cycle detection)
         self._last_verify_time = 0.0
         self._followup_verify_at = []          # monotonic deadlines armed after each connect
+        # DPI the precision-drag shift last wrote (None = not shifted). While
+        # set, the read-back verify must not "restore" the normal DPI mid-drag.
+        self._dpi_shift_active = None
         # 0x2121 Hi-Res Wheel + 0x2150 Thumbwheel native-invert state.
         # Lock ordering: outer `_wheel_divert_call_lock` serializes
         # cross-thread callers, inner `_wheel_divert_lock` protects the
@@ -1433,14 +1437,14 @@ class HidGestureListener:
 
     # ── low-level HID++ I/O ───────────────────────────────────────
 
-    def _tx(self, report_id, feat, func, params):
+    def _tx(self, report_id, feat, func, params, sw=MY_SW):
         """Transmit an HID++ message.  Always uses 20-byte long format
         because BLE HID collections typically only support long output reports."""
         buf = [0] * LONG_LEN
         buf[0] = LONG_ID                 # always long for BLE compat
         buf[1] = self._dev_idx
         buf[2] = feat
-        buf[3] = ((func & 0x0F) << 4) | (MY_SW & 0x0F)
+        buf[3] = ((func & 0x0F) << 4) | (sw & 0x0F)
         for i, b in enumerate(params):
             if 4 + i < LONG_LEN:
                 buf[4 + i] = b & 0xFF
@@ -1503,6 +1507,13 @@ class HidGestureListener:
 
             # HID++ error (feature-index 0xFF)
             if r_feat == 0xFF:
+                # params[0] = funcId<<4 | swId of the failing request. An
+                # error for a precision-drag write (its own software-id) is
+                # not an answer to this request.
+                if r_params and (r_params[0] & 0x0F) == SHIFT_SW:
+                    print(f"[HidGesture] precision DPI write rejected: "
+                          f"err=0x{(r_params[1] if len(r_params) > 1 else 0):02X}")
+                    continue
                 code = r_params[1] if len(r_params) > 1 else 0
                 code_name = HIDPP_ERROR_NAMES.get(code, "UNKNOWN")
                 print(f"[HidGesture] HID++ error 0x{code:02X} ({code_name}) "
@@ -1985,6 +1996,7 @@ class HidGestureListener:
             self._dpi_result = True
             self._dpi_reapply_on_wake = None
             self._last_dpi_set = dpi
+            self._dpi_shift_active = None
         else:
             print("[HidGesture] DPI set FAILED")
             self._dpi_result = False
@@ -2025,6 +2037,50 @@ class HidGestureListener:
             self._dpi_result = None
         self._pending_dpi = None
         self._dpi_event.set()
+
+    # ── Precision drag (temporary DPI shift) ─────────────────────
+    # The listener loop blocks in _rx() for up to a second, far too slow for
+    # a drag that has already started. These two write setSensorDpi straight
+    # from the caller's thread (the OS event-tap thread) without waiting for
+    # the acknowledgement; the listener forwards the reply to _on_report,
+    # which ignores it. _tx() serialises writes with its own lock.
+
+    _UNSHIFT_VERIFY_DELAY_S = 2.0
+
+    def _write_dpi_now(self, dpi):
+        if self._dpi_idx is None or self._dev is None:
+            return False
+        dpi = int(dpi)
+        try:
+            # Own software-id: the reply (func 3, or an error) must never be
+            # mistaken for the answer to a request the listener is waiting on.
+            self._tx(LONG_ID, self._dpi_idx, 3, [0x00, (dpi >> 8) & 0xFF, dpi & 0xFF],
+                     sw=SHIFT_SW)
+        except Exception as exc:
+            print(f"[HidGesture] immediate DPI write {dpi} failed: {exc}")
+            return False
+        return True
+
+    def shift_dpi(self, dpi):
+        """Drop the sensor to ``dpi`` right now (precision drag start).
+        Safe from any thread. Returns True when the write went out."""
+        ok = self._write_dpi_now(dpi)
+        if ok:
+            self._dpi_shift_active = int(dpi)
+        return ok
+
+    def unshift_dpi(self, base_dpi):
+        """Restore ``base_dpi`` right now (precision drag end) and schedule a
+        read-back so a lost restore is corrected within seconds."""
+        self._dpi_shift_active = None
+        ok = self._write_dpi_now(base_dpi)
+        self._arm_followup_verify(self._UNSHIFT_VERIFY_DELAY_S)
+        return ok
+
+    def _arm_followup_verify(self, delay_s, now=None):
+        if now is None:
+            now = time.monotonic()
+        self._followup_verify_at = sorted(self._followup_verify_at + [now + delay_s])
 
     # A DPI write right after (re)connect can be acknowledged and still not
     # stick: seen twice on an MX Master 3S behind a KVM, where the mouse
@@ -2067,6 +2123,10 @@ class HidGestureListener:
         # already queued is applied right after this check anyway.
         if self._pending_dpi is not None and self._pending_dpi != "read":
             return
+        # A precision-drag shift is deliberately not the saved DPI; unshift
+        # arms its own follow-up verify.
+        if self._dpi_shift_active is not None:
+            return
         expected = self._dpi_reapply_on_wake
         if expected is None:
             expected = self._last_dpi_set
@@ -2086,6 +2146,10 @@ class HidGestureListener:
         _, _, _, _, p = resp
         current = (p[1] << 8 | p[2]) if len(p) >= 3 else None
         if current is None:
+            return
+        # A precision drag that started during the read-back explains a low
+        # value; restoring now would undo it mid-drag.
+        if self._dpi_shift_active is not None:
             return
         if current == expected:
             # The device already holds the newest wanted value; a failed
@@ -3552,6 +3616,7 @@ class HidGestureListener:
                 except Exception:
                     pass
             print("[HidGesture] Listening for gesture events…")
+            self._dpi_shift_active = None
             self._arm_post_connect_verifies()
             _no_data_count = 0          # consecutive _rx() returning None
             _STALE_HOLD_LIMIT = 3       # force-release held buttons after this many empty reads (~3 s)

@@ -52,6 +52,14 @@ _BTN_TO_GESTURE_OWNER = {
 _SCROLL_INVERT_MARKER = 0x4D4F5553
 _INJECTED_EVENT_MARKER = 0x4D4F5554
 _SHIFT_WHEEL_HSCROLL_MARKER = 0x4D4F5556
+# CGEventFlags bits (stable ABI constants) for the precision-drag modifier.
+_PRECISION_FLAG_MASKS = {
+    "shift": 1 << 17,      # kCGEventFlagMaskShift
+    "control": 1 << 18,    # kCGEventFlagMaskControl
+    "option": 1 << 19,     # kCGEventFlagMaskAlternate
+    "command": 1 << 20,    # kCGEventFlagMaskCommand
+    "function": 1 << 23,   # kCGEventFlagMaskSecondaryFn
+}
 _kCGEventTapDisabledByTimeout = 0xFFFFFFFE
 _kCGEventTapDisabledByUserInput = 0xFFFFFFFF
 
@@ -68,6 +76,11 @@ class MouseHook(BaseMouseHook):
         self._tap = None
         self._tap_source = None
         self.ignore_trackpad = True
+        # Precision drag: a second, listen-only tap for primary-button
+        # down/up/drag so the main (active) tap's hot path is untouched.
+        self._precision_tap = None
+        self._precision_tap_source = None
+        self._precision_flag_mask = _PRECISION_FLAG_MASKS["command"]
         self._wake_observer = None
         self._screens_wake_observer = None
         self._session_resign_observer = None
@@ -236,6 +249,89 @@ class MouseHook(BaseMouseHook):
                 self._dispatch(event)
 
     @_autoreleased
+    # ── Precision drag ───────────────────────────────────────────────────
+    def configure_precision_drag(self, enabled, modifier="command", dpi=400,
+                                 base_dpi_provider=None):
+        self._precision_flag_mask = _PRECISION_FLAG_MASKS.get(
+            modifier, _PRECISION_FLAG_MASKS["command"]
+        )
+        super().configure_precision_drag(
+            enabled, modifier=modifier, dpi=dpi, base_dpi_provider=base_dpi_provider
+        )
+
+    def _precision_modifier_in(self, cg_event):
+        return bool(Quartz.CGEventGetFlags(cg_event) & self._precision_flag_mask)
+
+    def _precision_tap_callback(self, proxy, event_type, cg_event, refcon):
+        try:
+            if event_type in (
+                _kCGEventTapDisabledByTimeout,
+                _kCGEventTapDisabledByUserInput,
+            ):
+                # The release may have been dropped while the tap was off.
+                self._end_precision_drag()
+                if self._precision_tap is not None:
+                    Quartz.CGEventTapEnable(self._precision_tap, True)
+                return cg_event
+            # Button and modifier state are tracked even while the rule is
+            # off or no device is bound, so a drag that spans an enable /
+            # reconnect is never mistaken for a fresh press. The base state
+            # machine decides whether anything is written.
+            if event_type == Quartz.kCGEventLeftMouseDown:
+                self.precision_button(True, self._precision_modifier_in(cg_event))
+            elif event_type == Quartz.kCGEventLeftMouseUp:
+                self.precision_button(False, self._precision_modifier_in(cg_event))
+            elif event_type in (
+                Quartz.kCGEventLeftMouseDragged,
+                Quartz.kCGEventFlagsChanged,
+            ):
+                self.precision_modifier(self._precision_modifier_in(cg_event))
+        except Exception as exc:
+            print(f"[MouseHook] precision tap callback error: {exc}", flush=True)
+        return cg_event
+
+    def _start_precision_tap(self):
+        if self._precision_tap is not None:
+            return True
+        mask = (
+            Quartz.CGEventMaskBit(Quartz.kCGEventLeftMouseDown)
+            | Quartz.CGEventMaskBit(Quartz.kCGEventLeftMouseUp)
+            | Quartz.CGEventMaskBit(Quartz.kCGEventLeftMouseDragged)
+            # Modifier let go while the button rests: no drag event follows.
+            | Quartz.CGEventMaskBit(Quartz.kCGEventFlagsChanged)
+        )
+        tap = Quartz.CGEventTapCreate(
+            Quartz.kCGSessionEventTap,
+            Quartz.kCGHeadInsertEventTap,
+            Quartz.kCGEventTapOptionListenOnly,
+            mask,
+            self._precision_tap_callback,
+            None,
+        )
+        if tap is None:
+            print("[MouseHook] precision-drag tap could not be created", flush=True)
+            return False
+        source = Quartz.CFMachPortCreateRunLoopSource(None, tap, 0)
+        Quartz.CFRunLoopAddSource(
+            Quartz.CFRunLoopGetCurrent(), source, Quartz.kCFRunLoopCommonModes
+        )
+        Quartz.CGEventTapEnable(tap, True)
+        self._precision_tap = tap
+        self._precision_tap_source = source
+        print("[MouseHook] precision-drag tap enabled (listen-only)", flush=True)
+        return True
+
+    def _stop_precision_tap(self):
+        tap, self._precision_tap = self._precision_tap, None
+        source, self._precision_tap_source = self._precision_tap_source, None
+        if tap is None:
+            return
+        Quartz.CGEventTapEnable(tap, False)
+        if source is not None:
+            Quartz.CFRunLoopRemoveSource(
+                Quartz.CFRunLoopGetCurrent(), source, Quartz.kCFRunLoopCommonModes
+            )
+
     def _event_tap_callback(self, proxy, event_type, cg_event, refcon):
         try:
             if event_type in (
@@ -669,6 +765,7 @@ class MouseHook(BaseMouseHook):
         Quartz.CGEventTapEnable(self._tap, True)
         print("[MouseHook] CGEventTap enabled and integrated with run loop", flush=True)
         self._running = True
+        self._start_precision_tap()
 
         self._dispatch_thread = threading.Thread(
             target=self._dispatch_worker,
@@ -687,6 +784,9 @@ class MouseHook(BaseMouseHook):
         self._unregister_wake_observer()
         self._running = False
         self.abort_button_gesture("stop")
+        # Restore the DPI of a drag in progress while HID++ is still up.
+        self._stop_precision_tap()
+        self._end_precision_drag()
         self._stop_hid_listener()
         self._connected_device = None
 

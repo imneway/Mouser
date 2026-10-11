@@ -292,6 +292,325 @@ Item {
                 }
             }
 
+            Item { width: 1; height: 16; visible: backend.supportsPrecisionDrag }
+
+            // ── Precision drag (modifier + drag = temporary low DPI) ──
+            Rectangle {
+                id: precisionCard
+                visible: backend.supportsPrecisionDrag
+                width: parent.width - 72
+                anchors.horizontalCenter: parent.horizontalCenter
+                height: precisionContent.implicitHeight + 40
+                radius: Theme.radius
+                color: scrollPage.theme.bgCard
+                border.width: 1
+                border.color: scrollPage.theme.border
+
+                readonly property var modifierModel: backend.precisionDragModifiers.map(function(id) {
+                    return { "id": id, "label": s["scroll.precision_drag_mod_" + id] || id }
+                })
+                readonly property var modeModel: backend.precisionDragModes.map(function(id) {
+                    return { "id": id, "label": s["scroll.precision_drag_mode_" + id] || id }
+                })
+                function modifierIndex(id) {
+                    var i = backend.precisionDragModifiers.indexOf(id)
+                    return i < 0 ? 0 : i
+                }
+                function modeIndex(id) {
+                    var i = backend.precisionDragModes.indexOf(id)
+                    return i < 0 ? 0 : i
+                }
+
+                Column {
+                    id: precisionContent
+                    anchors {
+                        left: parent.left
+                        right: parent.right
+                        top: parent.top
+                        margins: 20
+                    }
+                    spacing: 12
+
+                    RowLayout {
+                        width: parent.width
+                        spacing: 12
+
+                        Column {
+                            Layout.fillWidth: true
+                            spacing: 4
+
+                            Text {
+                                text: s["scroll.precision_drag"]
+                                font {
+                                    family: uiState.fontFamily
+                                    pixelSize: 16
+                                    bold: true
+                                }
+                                color: scrollPage.theme.textPrimary
+                            }
+
+                            Text {
+                                width: parent.width
+                                text: s["scroll.precision_drag_desc"]
+                                font {
+                                    family: uiState.fontFamily
+                                    pixelSize: 12
+                                }
+                                color: scrollPage.theme.textSecondary
+                                wrapMode: Text.WordWrap
+                            }
+                        }
+
+                        Switch {
+                            id: precisionEnabledSwitch
+                            checked: backend.precisionDragEnabled
+                            focusPolicy: Qt.StrongFocus
+                            Material.accent: scrollPage.theme.accent
+                            Accessible.name: s["scroll.precision_drag_enable"]
+                            onClicked: backend.setPrecisionDragEnabled(checked)
+                        }
+                    }
+
+                    RowLayout {
+                        width: parent.width
+                        spacing: 12
+                        enabled: backend.precisionDragEnabled
+                        opacity: enabled ? 1 : 0.5
+
+                        Text {
+                            text: s["scroll.precision_drag_modifier"]
+                            font {
+                                family: uiState.fontFamily
+                                pixelSize: 12
+                            }
+                            color: scrollPage.theme.textSecondary
+                        }
+
+                        ComboBox {
+                            id: precisionModifierCombo
+                            Layout.preferredWidth: 150
+                            model: precisionCard.modifierModel
+                            textRole: "label"
+                            Material.accent: scrollPage.theme.accent
+                            font { family: uiState.fontFamily; pixelSize: 12 }
+                            currentIndex: precisionCard.modifierIndex(backend.precisionDragModifier)
+                            onActivated: function(index) {
+                                backend.setPrecisionDragModifier(backend.precisionDragModifiers[index])
+                            }
+                        }
+
+                        Text {
+                            text: s["scroll.precision_drag_dpi"]
+                            font {
+                                family: uiState.fontFamily
+                                pixelSize: 12
+                            }
+                            color: scrollPage.theme.textSecondary
+                        }
+
+                        WheelSafeSlider {
+                            id: precisionDpiSlider
+                            Layout.fillWidth: true
+                            from: backend.deviceDpiMin
+                            to: backend.deviceDpiMax
+                            stepSize: 50
+                            value: backend.precisionDragDpi
+                            accentColor: scrollPage.theme.accent
+                            accentDimColor: scrollPage.theme.accentDim
+                            trackColor: scrollPage.theme.border
+
+                            onMoved: {
+                                precisionDpiLabel.text = Math.round(value) + " DPI"
+                                precisionDpiDebounce.restart()
+                            }
+                        }
+
+                        Rectangle {
+                            Layout.preferredWidth: 104
+                            Layout.preferredHeight: 36
+                            radius: 10
+                            color: scrollPage.theme.accentDim
+
+                            Text {
+                                id: precisionDpiLabel
+                                anchors.centerIn: parent
+                                text: backend.precisionDragDpi + " DPI"
+                                font {
+                                    family: uiState.fontFamily
+                                    pixelSize: 14
+                                    bold: true
+                                }
+                                color: scrollPage.theme.accent
+                            }
+                        }
+                    }
+
+                    Timer {
+                        id: precisionDpiDebounce
+                        interval: 400
+                        onTriggered: backend.setPrecisionDragDpi(Math.round(precisionDpiSlider.value))
+                    }
+
+                    Rectangle {
+                        width: parent.width
+                        height: 1
+                        color: scrollPage.theme.border
+                    }
+
+                    Text {
+                        text: s["scroll.precision_drag_per_app"]
+                        font {
+                            family: uiState.fontFamily
+                            pixelSize: 13
+                            bold: true
+                        }
+                        color: scrollPage.theme.textPrimary
+                    }
+
+                    Text {
+                        width: parent.width
+                        text: backend.precisionDragAppRules.length === 0
+                              ? s["scroll.precision_drag_per_app_empty"]
+                              : s["scroll.precision_drag_per_app_desc"]
+                        font {
+                            family: uiState.fontFamily
+                            pixelSize: 11
+                        }
+                        color: scrollPage.theme.textSecondary
+                        wrapMode: Text.WordWrap
+                    }
+
+                    Repeater {
+                        model: backend.precisionDragAppRules
+
+                        delegate: Rectangle {
+                            required property var modelData
+                            width: parent.width
+                            height: ruleContent.implicitHeight + 20
+                            radius: 10
+                            color: scrollPage.theme.bgSubtle
+
+                            Column {
+                                id: ruleContent
+                                anchors {
+                                    left: parent.left
+                                    right: parent.right
+                                    top: parent.top
+                                    margins: 10
+                                }
+                                spacing: 8
+
+                                RowLayout {
+                                    width: parent.width
+                                    spacing: 12
+
+                                    Column {
+                                        Layout.fillWidth: true
+                                        spacing: 2
+
+                                        Text {
+                                            text: modelData.label
+                                            font {
+                                                family: uiState.fontFamily
+                                                pixelSize: 13
+                                            }
+                                            color: scrollPage.theme.textPrimary
+                                        }
+
+                                        Text {
+                                            width: parent.width
+                                            visible: text.length > 0
+                                            text: modelData.displayApps.join(", ")
+                                            font {
+                                                family: uiState.fontFamily
+                                                pixelSize: 11
+                                            }
+                                            color: scrollPage.theme.textSecondary
+                                            elide: Text.ElideRight
+                                        }
+                                    }
+
+                                    ComboBox {
+                                        Layout.preferredWidth: 150
+                                        model: precisionCard.modeModel
+                                        textRole: "label"
+                                        Material.accent: scrollPage.theme.accent
+                                        font { family: uiState.fontFamily; pixelSize: 12 }
+                                        currentIndex: precisionCard.modeIndex(modelData.mode)
+                                        onActivated: function(index) {
+                                            backend.setProfilePrecisionDrag(
+                                                modelData.name, backend.precisionDragModes[index],
+                                                modelData.modifier, modelData.dpi)
+                                        }
+                                    }
+                                }
+
+                                RowLayout {
+                                    width: parent.width
+                                    spacing: 12
+                                    visible: modelData.mode === "custom"
+
+                                    ComboBox {
+                                        Layout.preferredWidth: 150
+                                        model: precisionCard.modifierModel
+                                        textRole: "label"
+                                        Material.accent: scrollPage.theme.accent
+                                        font { family: uiState.fontFamily; pixelSize: 12 }
+                                        currentIndex: precisionCard.modifierIndex(modelData.modifier)
+                                        onActivated: function(index) {
+                                            backend.setProfilePrecisionDrag(
+                                                modelData.name, "custom",
+                                                backend.precisionDragModifiers[index], modelData.dpi)
+                                        }
+                                    }
+
+                                    WheelSafeSlider {
+                                        id: ruleDpiSlider
+                                        Layout.fillWidth: true
+                                        from: backend.deviceDpiMin
+                                        to: backend.deviceDpiMax
+                                        stepSize: 50
+                                        value: modelData.dpi
+                                        accentColor: scrollPage.theme.accent
+                                        accentDimColor: scrollPage.theme.accentDim
+                                        trackColor: scrollPage.theme.border
+
+                                        onMoved: ruleDpiLabel.text = Math.round(value) + " DPI"
+                                        // Commit on release only: a save rebuilds
+                                        // this list, which must not happen mid-drag.
+                                        onPressedChanged: {
+                                            if (!pressed && Math.round(value) !== modelData.dpi)
+                                                backend.setProfilePrecisionDrag(
+                                                    modelData.name, "custom",
+                                                    modelData.modifier, Math.round(value))
+                                        }
+                                    }
+
+                                    Rectangle {
+                                        Layout.preferredWidth: 92
+                                        Layout.preferredHeight: 30
+                                        radius: 8
+                                        color: scrollPage.theme.accentDim
+
+                                        Text {
+                                            id: ruleDpiLabel
+                                            anchors.centerIn: parent
+                                            text: modelData.dpi + " DPI"
+                                            font {
+                                                family: uiState.fontFamily
+                                                pixelSize: 12
+                                                bold: true
+                                            }
+                                            color: scrollPage.theme.accent
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             Item { width: 1; height: 16; visible: backend.smartShiftSupported && backend.deviceHasSmartShift }
 
             // ── Scroll Wheel Mode ─────────────────────────────────
@@ -1454,6 +1773,11 @@ Item {
                 startMinimizedSwitch.checked = backend.startMinimized
             }
             showMenuBarIconSwitch.checked = backend.showMenuBarIcon
+            precisionEnabledSwitch.checked = backend.precisionDragEnabled
+            if (!precisionDpiSlider.pressed) {
+                precisionDpiSlider.value = backend.precisionDragDpi
+                precisionDpiLabel.text = backend.precisionDragDpi + " DPI"
+            }
             checkUpdatesSwitch.checked = backend.checkForUpdates
             vscrollSwitch.checked = backend.invertVScroll
             hscrollSwitch.checked = backend.invertHScroll

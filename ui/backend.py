@@ -23,6 +23,9 @@ from core.config import (
     get_icon_for_exe, HAPTIC_ELIGIBLE_ACTIONS, set_action_haptic,
     set_button_haptic,
     GESTURE_SWIPE_ACTION, SWIPE_CAPABLE_BUTTONS, GESTURE_SWIPE_DIRECTIONS,
+    PRECISION_DRAG_MODIFIERS, PRECISION_DRAG_MODES,
+    get_global_precision_drag, get_profile_precision_drag,
+    set_profile_precision_drag,
 )
 from core import app_catalog
 from core.device_layouts import get_device_layout, get_manual_layout_choices
@@ -843,6 +846,52 @@ class Backend(QObject):
         # icon is never the only way in.
         return sys.platform == "darwin"
 
+    # ── Precision drag ──────────────────────────────────────────
+    @Property(bool, constant=True)
+    def supportsPrecisionDrag(self):
+        # Needs the platform hook to report primary-button drags with
+        # modifier state; wired on macOS (listen-only CGEventTap).
+        return sys.platform == "darwin"
+
+    @Property(list, constant=True)
+    def precisionDragModifiers(self):
+        return list(PRECISION_DRAG_MODIFIERS)
+
+    @Property(list, constant=True)
+    def precisionDragModes(self):
+        return list(PRECISION_DRAG_MODES)
+
+    @Property(bool, notify=settingsChanged)
+    def precisionDragEnabled(self):
+        return get_global_precision_drag(self._cfg)["enabled"]
+
+    @Property(str, notify=settingsChanged)
+    def precisionDragModifier(self):
+        return get_global_precision_drag(self._cfg)["modifier"]
+
+    @Property(int, notify=settingsChanged)
+    def precisionDragDpi(self):
+        return get_global_precision_drag(self._cfg)["dpi"]
+
+    @Property(list, notify=settingsChanged)
+    def precisionDragAppRules(self):
+        """One row per app profile (never the default): its override."""
+        rows = []
+        for pname, pdata in self._cfg.get("profiles", {}).items():
+            if pname == "default":
+                continue
+            rule = get_profile_precision_drag(self._cfg, pname)
+            apps = pdata.get("apps", [])
+            rows.append({
+                "name": pname,
+                "label": pdata.get("label", pname),
+                "displayApps": [app_catalog.get_app_label(ex) for ex in apps],
+                "mode": rule["mode"],
+                "modifier": rule["modifier"],
+                "dpi": rule["dpi"],
+            })
+        return rows
+
     @Property(bool, constant=True)
     def supportsStartAtLogin(self):
         return supports_login_startup()
@@ -1528,6 +1577,53 @@ class Backend(QObject):
         save_config(self._cfg)
         self.settingsChanged.emit()
         self.statusMessage.emit("Saved")
+
+    def _save_precision_drag(self):
+        save_config(self._cfg)
+        if self._engine:
+            self._engine.reload_mappings()
+        self.settingsChanged.emit()
+        self.statusMessage.emit("Saved")
+
+    @Slot(bool)
+    def setPrecisionDragEnabled(self, value):
+        enabled = bool(value)
+        if self.precisionDragEnabled == enabled:
+            return
+        self._cfg.setdefault("settings", {})["precision_drag_enabled"] = enabled
+        self._save_precision_drag()
+
+    @Slot(str)
+    def setPrecisionDragModifier(self, modifier):
+        if modifier not in PRECISION_DRAG_MODIFIERS or self.precisionDragModifier == modifier:
+            return
+        self._cfg.setdefault("settings", {})["precision_drag_modifier"] = modifier
+        self._save_precision_drag()
+
+    @Slot(int)
+    def setPrecisionDragDpi(self, value):
+        dpi = clamp_dpi(value, self._resolved_connected_device())
+        if self.precisionDragDpi == dpi:
+            return
+        self._cfg.setdefault("settings", {})["precision_drag_dpi"] = dpi
+        self._save_precision_drag()
+
+    @Slot(str, str, str, int)
+    def setProfilePrecisionDrag(self, profile_name, mode, modifier, dpi):
+        """Per-app override: mode inherit/off/custom (+ modifier, dpi)."""
+        if profile_name == "default" or profile_name not in self._cfg.get("profiles", {}):
+            return
+        if mode not in PRECISION_DRAG_MODES:
+            return
+        dpi = clamp_dpi(dpi, self._resolved_connected_device()) if dpi > 0 else None
+        modifier = modifier if modifier in PRECISION_DRAG_MODIFIERS else None
+        before = get_profile_precision_drag(self._cfg, profile_name)
+        self._cfg = set_profile_precision_drag(
+            self._cfg, profile_name, mode, modifier=modifier, dpi=dpi
+        )
+        if get_profile_precision_drag(self._cfg, profile_name) == before:
+            return
+        self._save_precision_drag()
 
     @Slot(bool)
     def setCheckForUpdates(self, value):

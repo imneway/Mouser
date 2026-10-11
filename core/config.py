@@ -267,6 +267,11 @@ DEFAULT_CONFIG = {
         "start_minimized": True,
         "start_at_login": False,
         "show_menu_bar_icon": True,  # macOS: hide to keep Mouser out of the menu bar
+        # Precision drag: hold a modifier key while dragging to drop the
+        # sensor to a low DPI, restored on release (fine colour picking etc.).
+        "precision_drag_enabled": False,
+        "precision_drag_modifier": "command",
+        "precision_drag_dpi": 400,
         "hscroll_threshold": 0.1,
         "invert_hscroll": False,  # swap horizontal scroll directions
         "invert_vscroll": False,  # swap vertical scroll directions
@@ -566,6 +571,87 @@ def _app_identity_aliases(spec: str) -> set[str]:
         return {spec.casefold()}
     aliases = [entry.get("id", ""), *entry.get("aliases", [])]
     return {alias.casefold() for alias in aliases if alias}
+
+
+# ── Precision drag ──────────────────────────────────────────────────────────
+# Global settings carry the default rule; a profile may override it with a
+# ``precision_drag`` dict: {"mode": "inherit" | "off" | "custom",
+# "modifier": <PRECISION_DRAG_MODIFIERS>, "dpi": int}. ``inherit`` (or no
+# dict at all) follows the global rule, ``off`` disables it for that app.
+PRECISION_DRAG_MODIFIERS = ("command", "option", "control", "shift", "function")
+PRECISION_DRAG_MODES = ("inherit", "off", "custom")
+PRECISION_DRAG_DEFAULT_MODIFIER = "command"
+PRECISION_DRAG_DEFAULT_DPI = 400
+
+
+def _precision_modifier(value, fallback=PRECISION_DRAG_DEFAULT_MODIFIER):
+    return value if value in PRECISION_DRAG_MODIFIERS else fallback
+
+
+def _precision_dpi(value, fallback=PRECISION_DRAG_DEFAULT_DPI):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return fallback
+    return int(value) if value > 0 else fallback
+
+
+def get_global_precision_drag(cfg):
+    """The global precision-drag rule as {"enabled", "modifier", "dpi"}."""
+    settings = cfg.get("settings", {})
+    return {
+        "enabled": bool(settings.get("precision_drag_enabled", False)),
+        "modifier": _precision_modifier(settings.get("precision_drag_modifier")),
+        "dpi": _precision_dpi(settings.get("precision_drag_dpi")),
+    }
+
+
+def get_profile_precision_drag(cfg, profile_name):
+    """A profile's own override as {"mode", "modifier", "dpi"} (never None)."""
+    pdata = cfg.get("profiles", {}).get(profile_name, {}) or {}
+    raw = pdata.get("precision_drag")
+    raw = raw if isinstance(raw, dict) else {}
+    glob = get_global_precision_drag(cfg)
+    mode = raw.get("mode")
+    if mode not in PRECISION_DRAG_MODES:
+        mode = "inherit"
+    return {
+        "mode": mode,
+        "modifier": _precision_modifier(raw.get("modifier"), glob["modifier"]),
+        "dpi": _precision_dpi(raw.get("dpi"), glob["dpi"]),
+    }
+
+
+def get_precision_drag_for_profile(cfg, profile_name):
+    """The effective rule for ``profile_name``: the profile override when it
+    has one, else the global rule."""
+    glob = get_global_precision_drag(cfg)
+    override = get_profile_precision_drag(cfg, profile_name)
+    if override["mode"] == "off":
+        return {"enabled": False, "modifier": glob["modifier"], "dpi": glob["dpi"]}
+    if override["mode"] == "custom":
+        return {
+            "enabled": glob["enabled"],
+            "modifier": override["modifier"],
+            "dpi": override["dpi"],
+        }
+    return glob
+
+
+def set_profile_precision_drag(cfg, profile_name, mode, modifier=None, dpi=None):
+    """Store a profile's precision-drag override. ``inherit`` removes it."""
+    profiles = cfg.setdefault("profiles", {})
+    pdata = profiles.get(profile_name)
+    if pdata is None:
+        return cfg
+    if mode not in PRECISION_DRAG_MODES or mode == "inherit":
+        pdata.pop("precision_drag", None)
+        return cfg
+    current = get_profile_precision_drag(cfg, profile_name)
+    pdata["precision_drag"] = {
+        "mode": mode,
+        "modifier": _precision_modifier(modifier, current["modifier"]),
+        "dpi": _precision_dpi(dpi, current["dpi"]),
+    }
+    return cfg
 
 
 def get_profile_for_app_identity(cfg, app_identity: tuple[str, ...] | None) -> str:

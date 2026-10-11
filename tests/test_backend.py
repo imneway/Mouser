@@ -1497,6 +1497,41 @@ class BackendLoginStartupTests(unittest.TestCase):
         save_mock.assert_called_once()
         self.assertEqual(changed, [1])
 
+    def test_precision_drag_settings_and_per_app_override_persist(self):
+        cfg = copy.deepcopy(DEFAULT_CONFIG)
+        cfg["profiles"]["figma"] = {"label": "Figma", "apps": ["Figma"], "mappings": {}}
+        with (
+            patch("ui.backend.load_config", return_value=cfg),
+            patch("ui.backend.save_config") as save_mock,
+            patch("ui.backend.supports_login_startup", return_value=False),
+        ):
+            backend = Backend(engine=None)
+            self.assertFalse(backend.precisionDragEnabled)
+            self.assertEqual(backend.precisionDragModifier, "command")
+            self.assertEqual(backend.precisionDragDpi, 400)
+            self.assertEqual(backend.precisionDragAppRules[0]["mode"], "inherit")
+
+            backend.setPrecisionDragEnabled(True)
+            backend.setPrecisionDragModifier("option")
+            backend.setPrecisionDragModifier("hyper")      # rejected: no save
+            backend.setPrecisionDragDpi(300)
+            backend.setProfilePrecisionDrag("figma", "custom", "control", 250)
+            backend.setProfilePrecisionDrag("default", "off", "", 0)  # never the default
+            backend.setProfilePrecisionDrag("figma", "custom", "control", 250)  # unchanged
+
+        self.assertEqual(cfg["settings"]["precision_drag_enabled"], True)
+        self.assertEqual(cfg["settings"]["precision_drag_modifier"], "option")
+        self.assertEqual(cfg["settings"]["precision_drag_dpi"], 300)
+        self.assertEqual(
+            cfg["profiles"]["figma"]["precision_drag"],
+            {"mode": "custom", "modifier": "control", "dpi": 250},
+        )
+        self.assertNotIn("precision_drag", cfg["profiles"]["default"])
+        rule = backend.precisionDragAppRules[0]
+        self.assertEqual((rule["name"], rule["mode"], rule["modifier"], rule["dpi"]),
+                         ("figma", "custom", "control", 250))
+        self.assertEqual(save_mock.call_count, 4)
+
 
 @unittest.skipIf(Backend is None, "PySide6 not installed in test environment")
 class BackendHandleDpiReadTests(unittest.TestCase):

@@ -55,6 +55,18 @@ class BaseMouseHook:
         self._connection_change_cb = None
         self._battery_notify_cb = None
         self._last_pointer_activity_at = None
+        # ── Precision drag ──
+        # Hold a modifier while dragging with the primary button to drop the
+        # sensor to a low DPI; released (or the modifier let go) restores it.
+        # The platform hook reports button + modifier state; the HID++ write
+        # happens through HidGestureListener.shift_dpi / unshift_dpi.
+        self._precision_enabled = False
+        self._precision_modifier = "command"
+        self._precision_dpi = 400
+        self._precision_base_dpi_provider = None
+        self._precision_modifier_held = False
+        self._precision_button_down = False
+        self._precision_active = False
         self.divert_mode_shift = False
         self.divert_dpi_switch = False
         self.wheel_native_invert_active = False
@@ -389,6 +401,106 @@ class BaseMouseHook:
             return False
         return True
 
+    # ── Precision drag ───────────────────────────────────────────────────
+    def configure_precision_drag(self, enabled, modifier="command", dpi=400,
+                                 base_dpi_provider=None):
+        """Apply the effective precision-drag rule (engine, per profile).
+        ``base_dpi_provider()`` returns the DPI to restore on release."""
+        enabled = bool(enabled)
+        dpi = int(dpi)
+        changed = (
+            enabled != self._precision_enabled
+            or modifier != self._precision_modifier
+            or dpi != self._precision_dpi
+        )
+        if changed and self._precision_active:
+            # A different rule mid-drag: end the shift under the old rule; a
+            # new modifier must be sampled from the next event before the
+            # new rule can start one.
+            self._precision_unshift()
+            if modifier != self._precision_modifier:
+                self._precision_modifier_held = False
+        self._precision_enabled = enabled
+        self._precision_modifier = modifier
+        self._precision_dpi = dpi
+        if base_dpi_provider is not None:
+            self._precision_base_dpi_provider = base_dpi_provider
+        self._update_precision_drag()
+
+    @property
+    def precision_drag_active(self):
+        return self._precision_active
+
+    def precision_button(self, down, modifier_held):
+        """Primary button went down/up with the chosen modifier held or not."""
+        self._precision_button_down = bool(down)
+        self._precision_modifier_held = bool(modifier_held)
+        self._update_precision_drag()
+
+    def precision_modifier(self, modifier_held):
+        """Modifier state sampled during a drag (held mid-drag starts the
+        shift; let go mid-drag ends it)."""
+        held = bool(modifier_held)
+        if held == self._precision_modifier_held:
+            return
+        self._precision_modifier_held = held
+        self._update_precision_drag()
+
+    def _precision_base_dpi(self):
+        provider = self._precision_base_dpi_provider
+        if provider is None:
+            return None
+        try:
+            return int(provider())
+        except Exception:
+            return None
+
+    def _end_precision_drag(self, restore=True):
+        """Forget the sampled button/modifier state (the release may never
+        reach us: tap disabled, hook stopping, device gone) and restore the
+        DPI when a shift is in progress and the device is still there."""
+        self._precision_button_down = False
+        self._precision_modifier_held = False
+        if not self._precision_active:
+            return
+        if restore:
+            self._precision_unshift()
+        else:
+            self._precision_active = False
+
+    def _update_precision_drag(self):
+        want = (
+            self._precision_enabled
+            and self._precision_button_down
+            and self._precision_modifier_held
+        )
+        if want == self._precision_active:
+            return
+        if want:
+            shift = getattr(self._hid_gesture, "shift_dpi", None)
+            if shift is None or not self._should_intercept_events():
+                return
+            try:
+                if shift(self._precision_dpi):
+                    self._precision_active = True
+                    self._emit_debug(f"Precision drag: DPI -> {self._precision_dpi}")
+            except Exception as exc:
+                print(f"[MouseHook] precision shift failed: {exc}")
+            return
+        self._precision_unshift()
+
+    def _precision_unshift(self):
+        self._precision_active = False
+        base = self._precision_base_dpi()
+        unshift = getattr(self._hid_gesture, "unshift_dpi", None)
+        if unshift is None or base is None:
+            return
+        try:
+            unshift(base)
+            self._emit_debug(f"Precision drag: DPI -> {base}")
+        except Exception as exc:
+            print(f"[MouseHook] precision restore failed: {exc}")
+
     def _should_intercept_events(self) -> bool:
         """True only when the platform hook should block, remap, or dispatch
         OS-level mouse events to the engine.
@@ -546,6 +658,9 @@ class BaseMouseHook:
     def _on_hid_disconnect(self):
         self._connected_device = None
         self._set_device_connected(False)
+        # The device is gone (its DPI is re-applied on reconnect) and the
+        # release of a drag in progress may never arrive.
+        self._end_precision_drag(restore=False)
 
     def _on_hid_battery(self, level, charging):
         cb = self._battery_notify_cb
