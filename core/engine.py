@@ -1199,28 +1199,8 @@ class Engine:
         ss_threshold = saved_ss_state["threshold"]
         ss_scroll_force = saved_ss_state["scroll_force"]
 
-        # Phase A: apply Smart Shift immediately so the physical wheel mode
-        # converges before the settled replay.
-        if saved_ss and getattr(hg, "smart_shift_supported", False):
-            if not hasattr(hg, "set_smart_shift"):
-                replay_ok = False
-            else:
-                if not hg.set_smart_shift(saved_ss, ss_enabled, ss_threshold, ss_scroll_force):
-                    replay_ok = False
-                if self._smart_shift_read_cb:
-                    try:
-                        self._smart_shift_read_cb(saved_ss_state)
-                    except Exception:
-                        pass
-
-        # Short settle between the Smart Shift write and the DPI write. The
-        # device is already answering HID++ at this point; 3 s only delayed
-        # the DPI restore after every reconnect.
-        time.sleep(0.5)
-        hg = self.hook._hid_gesture
-        if hg is None or getattr(hg, "connected_device", None) is None:
-            return False
-
+        # DPI first: it is what the user feels the moment the mouse is back,
+        # and each queued write waits up to a listener-loop pass (~1 s).
         if saved_dpi is not None:
             if not hasattr(hg, "set_dpi"):
                 replay_ok = False
@@ -1233,6 +1213,26 @@ class Engine:
             else:
                 replay_ok = False
                 retry_dpi = True
+
+        # Phase A: apply Smart Shift right away so the physical wheel mode
+        # converges before the settled replay below.
+        if saved_ss and getattr(hg, "smart_shift_supported", False):
+            if not hasattr(hg, "set_smart_shift"):
+                replay_ok = False
+            else:
+                if not hg.set_smart_shift(saved_ss, ss_enabled, ss_threshold, ss_scroll_force):
+                    replay_ok = False
+                if self._smart_shift_read_cb:
+                    try:
+                        self._smart_shift_read_cb(saved_ss_state)
+                    except Exception:
+                        pass
+
+        # Short settle, then write Smart Shift once more.
+        time.sleep(0.5)
+        hg = self.hook._hid_gesture
+        if hg is None or getattr(hg, "connected_device", None) is None:
+            return False
 
         if saved_ss and getattr(hg, "smart_shift_supported", False):
             if not hasattr(hg, "set_smart_shift"):

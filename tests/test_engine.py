@@ -380,6 +380,18 @@ class EngineReplayPhaseOneTests(unittest.TestCase):
             expected_ss_mode, expected_ss_enabled, expected_ss_threshold, expected_ss_scroll_force
         )
 
+    def test_replay_writes_dpi_before_smart_shift(self):
+        engine = self._make_engine()
+        hid = self._make_hid(connected_device=SimpleNamespace(name="MX Master 3S"))
+        order = []
+        hid.set_dpi.side_effect = lambda *_a: order.append("dpi") or True
+        hid.set_smart_shift.side_effect = lambda *_a: order.append("smart_shift") or True
+        engine.hook._hid_gesture = hid
+        with patch("core.engine.time.sleep"):
+            engine._run_saved_settings_replay()
+        self.assertEqual(order[0], "dpi")
+        self.assertIn("smart_shift", order)
+
     def test_live_reconnect_replay_restores_saved_values_through_worker(self):
         engine = self._make_engine()
         engine.hook._hid_gesture = self._make_hid(connected_device=None)
