@@ -99,6 +99,45 @@ class MacOSHookDeviceChangeTests(unittest.TestCase):
         monitor.stop.assert_called_once_with()
 
 
+class MacOSMotionWakesReconnectTests(unittest.TestCase):
+    """Pointer motion must reach the HID++ listener while no Logitech is
+    bound -- that motion is what cuts the reconnect backoff short after a
+    KVM / Easy-Switch return."""
+
+    def setUp(self):
+        self._module_name = "core.mouse_hook_macos"
+        self._saved_module = sys.modules.pop(self._module_name, None)
+        self._saved_attr = getattr(core, "mouse_hook_macos", None)
+        fake_objc = SimpleNamespace(autorelease_pool=MagicMock())
+        fake_quartz = MagicMock(name="Quartz")
+        with patch.dict(sys.modules, {"objc": fake_objc, "Quartz": fake_quartz}):
+            self.module = importlib.import_module(self._module_name)
+        self.addCleanup(self._restore)
+        self.quartz = self.module.Quartz
+        self.quartz.CGEventGetIntegerValueField.return_value = 0
+        self.hook = self.module.MouseHook()
+        self.hook._first_event_logged = True
+        self.listener = Mock()
+        self.hook._hid_gesture = self.listener
+
+    def _restore(self):
+        sys.modules.pop(self._module_name, None)
+        if self._saved_module is not None:
+            sys.modules[self._module_name] = self._saved_module
+        if self._saved_attr is not None:
+            core.mouse_hook_macos = self._saved_attr
+        elif getattr(core, "mouse_hook_macos", None) is self.module:
+            delattr(core, "mouse_hook_macos")
+
+    def test_motion_while_disconnected_wakes_the_listener_and_passes_through(self):
+        self.hook._connected_device = None
+        result = self.hook._event_tap_callback(
+            None, self.quartz.kCGEventMouseMoved, "evt", None
+        )
+        self.assertEqual(result, "evt")
+        self.listener.notify_user_input.assert_called_once_with()
+
+
 class LogitechDeviceMonitorTests(unittest.TestCase):
     def test_start_reports_failure_off_macos(self):
         with patch.object(macos_device_monitor, "_load_native", return_value=None):

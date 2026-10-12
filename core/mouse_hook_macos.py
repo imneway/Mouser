@@ -376,15 +376,20 @@ class MouseHook(BaseMouseHook):
             # exact failure mode users hit when their KVM switches the
             # Logitech to another machine while Mouser keeps running on
             # this one.
-            if not self._should_intercept_events():
-                return cg_event
-
+            # Real pointer activity, checked *before* the pass-through guard
+            # (as on Windows): while no Logitech is bound, the first motion
+            # after a KVM / Easy-Switch return is what wakes the HID++
+            # reconnect loop out of its backoff. After the guard it was never
+            # seen, so the reconnect waited for the next timed retry.
             if event_type in (
                 Quartz.kCGEventMouseMoved,
                 Quartz.kCGEventOtherMouseDragged,
                 Quartz.kCGEventScrollWheel,
             ):
                 self.note_pointer_activity()
+
+            if not self._should_intercept_events():
+                return cg_event
 
             mouse_event = None
             should_block = False
