@@ -2080,6 +2080,20 @@ class HidGestureListener:
         self._arm_followup_verify(self._UNSHIFT_VERIFY_DELAY_S)
         return ok
 
+    def _queue_reconnect_dpi(self):
+        """On a reconnect, queue the newest wanted DPI so the listener loop
+        writes it on its very first pass -- before the engine's settings
+        replay, which waits on the loop and writes Smart Shift too. A fresh
+        start (nothing written yet) is left to the replay."""
+        wanted = self._dpi_reapply_on_wake
+        if wanted is None:
+            wanted = self._last_dpi_set
+        if wanted is None or self._pending_dpi is not None:
+            return False
+        print(f"[HidGesture] Re-applying DPI {wanted} on reconnect")
+        self._pending_dpi = wanted
+        return True
+
     def _arm_followup_verify(self, delay_s, now=None):
         if now is None:
             now = time.monotonic()
@@ -3613,13 +3627,14 @@ class HidGestureListener:
             connect_backoff_s = _CONNECT_BACKOFF_BASE_S
 
             self._connected = True
+            self._dpi_shift_active = None
+            self._queue_reconnect_dpi()
             if self._on_connect:
                 try:
                     self._on_connect()
                 except Exception:
                     pass
             print("[HidGesture] Listening for gesture events…")
-            self._dpi_shift_active = None
             self._arm_post_connect_verifies()
             _no_data_count = 0          # consecutive _rx() returning None
             _STALE_HOLD_LIMIT = 3       # force-release held buttons after this many empty reads (~3 s)

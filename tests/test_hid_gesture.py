@@ -655,6 +655,41 @@ class HidDpiReapplyAfterWakeTests(unittest.TestCase):
         self.assertIsNone(listener._dpi_reapply_on_wake)
 
 
+class ReconnectDpiQueueTests(unittest.TestCase):
+    """On a reconnect the listener queues the newest wanted DPI itself, so it
+    is written on the loop's first pass instead of after the engine replay."""
+
+    def _listener(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._dev = object()
+        listener._dpi_idx = 0x0D
+        return listener
+
+    def test_reconnect_queues_last_written_dpi(self):
+        listener = self._listener()
+        listener._last_dpi_set = 3200
+        with patch("builtins.print"):
+            self.assertTrue(listener._queue_reconnect_dpi())
+        self.assertEqual(listener._pending_dpi, 3200)
+
+    def test_newest_wanted_value_wins_over_last_written(self):
+        listener = self._listener()
+        listener._last_dpi_set = 3200
+        listener._dpi_reapply_on_wake = 1600
+        with patch("builtins.print"):
+            listener._queue_reconnect_dpi()
+        self.assertEqual(listener._pending_dpi, 1600)
+
+    def test_fresh_start_or_queued_write_is_left_alone(self):
+        listener = self._listener()
+        self.assertFalse(listener._queue_reconnect_dpi())
+        self.assertIsNone(listener._pending_dpi)
+        listener._last_dpi_set = 3200
+        listener._pending_dpi = 800
+        self.assertFalse(listener._queue_reconnect_dpi())
+        self.assertEqual(listener._pending_dpi, 800)
+
+
 class HidPowerCycleRestoreTests(unittest.TestCase):
     """A mouse that was powered off/on comes back with firmware-default
     settings while the receiver never disappears; a DPI read-back detects
