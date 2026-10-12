@@ -680,6 +680,49 @@ class ReconnectDpiQueueTests(unittest.TestCase):
             listener._queue_reconnect_dpi()
         self.assertEqual(listener._pending_dpi, 1600)
 
+    def test_newer_request_queued_mid_write_stays_pending(self):
+        listener = self._listener()
+        listener._last_dpi_set = 3200
+        with patch("builtins.print"):
+            listener._queue_reconnect_dpi()
+
+        def _write(*_args, **_kwargs):
+            # The engine replay queues the user's newer value meanwhile.
+            listener._dpi_req_gen += 1
+            listener._pending_dpi = 1600
+            listener._dpi_event.clear()
+            return (1, 0x0D, 3, hid_gesture.MY_SW, [0x00, 0x0C, 0x80])
+
+        with patch.object(listener, "_request", side_effect=_write), patch("builtins.print"):
+            listener._apply_pending_dpi()
+        self.assertEqual(listener._pending_dpi, 1600)
+        self.assertFalse(listener._dpi_event.is_set())
+        self.assertEqual(listener._last_dpi_set, 3200)
+
+        reply = (1, 0x0D, 3, hid_gesture.MY_SW, [0x00, 0x06, 0x40])
+        with patch.object(listener, "_request", return_value=reply), patch("builtins.print"):
+            listener._apply_pending_dpi()
+        self.assertIsNone(listener._pending_dpi)
+        self.assertTrue(listener._dpi_event.is_set())
+        self.assertIs(listener._dpi_result, True)
+        self.assertEqual(listener._last_dpi_set, 1600)
+
+    def test_set_dpi_while_away_becomes_the_newest_wanted_value(self):
+        listener = self._listener()
+        listener._last_dpi_set = 3200
+        listener._dev = None
+        with (
+            patch.object(listener._dpi_event, "wait", return_value=False),
+            patch("builtins.print"),
+        ):
+            self.assertFalse(listener.set_dpi(1600))
+        self.assertEqual(listener._dpi_reapply_on_wake, 1600)
+        self.assertIsNone(listener._pending_dpi)
+        listener._dev = object()
+        with patch("builtins.print"):
+            listener._queue_reconnect_dpi()
+        self.assertEqual(listener._pending_dpi, 1600)
+
     def test_fresh_start_or_queued_write_is_left_alone(self):
         listener = self._listener()
         self.assertFalse(listener._queue_reconnect_dpi())

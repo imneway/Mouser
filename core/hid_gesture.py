@@ -1130,6 +1130,9 @@ class HidGestureListener:
         self._verify_requested = False         # re-check device state (power-cycle detection)
         self._last_verify_time = 0.0
         self._followup_verify_at = []          # monotonic deadlines armed after each connect
+        # Bumped by every queued DPI write/read; a pass that finishes after a
+        # newer request was queued must neither clear it nor signal it done.
+        self._dpi_req_gen = 0
         # DPI the precision-drag shift last wrote (None = not shifted). While
         # set, the read-back verify must not "restore" the normal DPI mid-drag.
         self._dpi_shift_active = None
@@ -1966,23 +1969,38 @@ class HidGestureListener:
         dpi = clamp_dpi(dpi_value, self._connected_device_info)
         self._dpi_result = None
         self._dpi_event.clear()
+        self._dpi_req_gen += 1
+        gen = self._dpi_req_gen
         self._pending_dpi = dpi
-        if not self._dpi_event.wait(3.0):
-            print("[HidGesture] DPI set timed out")
-            self._pending_dpi = None
-            return False
-        return self._dpi_result is True
+        done = self._dpi_event.wait(3.0)
+        ok = done and self._dpi_result is True
+        if not ok and gen == self._dpi_req_gen:
+            if not done:
+                print("[HidGesture] DPI set timed out")
+                self._pending_dpi = None
+            # Not written (mouse away, link dropped, timed out) but still the
+            # newest wanted value: the reconnect write and the verify use it.
+            self._dpi_reapply_on_wake = dpi
+        return ok
+
+    def _finish_dpi_request(self, gen, result):
+        """Publish a DPI pass's result unless a newer request was queued
+        while it ran; that one stays pending for the next pass."""
+        if gen != self._dpi_req_gen:
+            return
+        self._dpi_result = result
+        self._pending_dpi = None
+        self._dpi_event.set()
 
     def _apply_pending_dpi(self):
         """Called from the listener thread to actually send DPI."""
         dpi = self._pending_dpi
         if dpi is None:
             return
+        gen = self._dpi_req_gen
         if self._dpi_idx is None or self._dev is None:
             print("[HidGesture] Cannot set DPI -- not connected")
-            self._dpi_result = False
-            self._pending_dpi = None
-            self._dpi_event.set()
+            self._finish_dpi_request(gen, False)
             return
         hi = (dpi >> 8) & 0xFF
         lo = dpi & 0xFF
@@ -1993,37 +2011,39 @@ class HidGestureListener:
             _, _, _, _, p = resp
             actual = (p[1] << 8 | p[2]) if len(p) >= 3 else dpi
             print(f"[HidGesture] DPI set to {actual}")
-            self._dpi_result = True
-            self._dpi_reapply_on_wake = None
             self._last_dpi_set = dpi
             self._dpi_shift_active = None
+            if gen == self._dpi_req_gen:
+                self._dpi_reapply_on_wake = None
+            self._finish_dpi_request(gen, True)
         else:
             print("[HidGesture] DPI set FAILED")
-            self._dpi_result = False
             # Usually the mouse dozed off between the connect handshake and
             # this write; replay it as soon as the device talks to us again.
-            self._dpi_reapply_on_wake = dpi
-        self._pending_dpi = None
-        self._dpi_event.set()
+            if gen == self._dpi_req_gen:
+                self._dpi_reapply_on_wake = dpi
+            self._finish_dpi_request(gen, False)
 
     def read_dpi(self):
         """Queue a DPI read -- will be applied on the listener thread.
         Can be called from any thread.  Returns the DPI value or None."""
         self._dpi_result = None
         self._dpi_event.clear()
+        self._dpi_req_gen += 1
+        gen = self._dpi_req_gen
         self._pending_dpi = "read"
         if not self._dpi_event.wait(3.0):
             print("[HidGesture] DPI read timed out")
-            self._pending_dpi = None
+            if gen == self._dpi_req_gen:
+                self._pending_dpi = None
             return None
         return self._dpi_result
 
     def _apply_pending_read_dpi(self):
         """Called from the listener thread to read current DPI."""
+        gen = self._dpi_req_gen
         if self._dpi_idx is None or self._dev is None:
-            self._dpi_result = None
-            self._pending_dpi = None
-            self._dpi_event.set()
+            self._finish_dpi_request(gen, None)
             return
         # getSensorDpi: function 2, params [sensorIdx=0]
         resp = self._request(self._dpi_idx, 2, [0x00])
@@ -2031,12 +2051,10 @@ class HidGestureListener:
             _, _, _, _, p = resp
             current = (p[1] << 8 | p[2]) if len(p) >= 3 else None
             print(f"[HidGesture] Current DPI = {current}")
-            self._dpi_result = current
+            self._finish_dpi_request(gen, current)
         else:
             print("[HidGesture] DPI read FAILED")
-            self._dpi_result = None
-        self._pending_dpi = None
-        self._dpi_event.set()
+            self._finish_dpi_request(gen, None)
 
     # ── Precision drag (temporary DPI shift) ─────────────────────
     # The listener loop blocks in _rx() for up to a second, far too slow for
@@ -2091,6 +2109,7 @@ class HidGestureListener:
         if wanted is None or self._pending_dpi is not None:
             return False
         print(f"[HidGesture] Re-applying DPI {wanted} on reconnect")
+        self._dpi_req_gen += 1
         self._pending_dpi = wanted
         return True
 
