@@ -3140,27 +3140,43 @@ class HidGestureListener:
                   f"usage=0x{usage:04X} transport={transport or '-'} "
                   f"source={source} product={product} path={path or '-'}")
 
+        # Requests only travel as 20-byte long reports, which only a
+        # receiver's long-report collection (usage 0x0002) can carry. Its
+        # short-report collection (usage 0x0001) can never answer, so when
+        # both are listed the short one is skipped outright: probing it
+        # cost a full round of slot timeouts on every pass the long one
+        # was cooling down after a silent probe (mouse asleep or not yet
+        # re-linked after a KVM switch).
+        receiver_long_collections = {
+            (info.get("product_id", 0), info.get("product_string"))
+            for info in infos
+            if int(info.get("usage", 0) or 0) == 0x0002
+            and "receiver" in (info.get("product_string") or "").lower()
+        }
+
+        def _is_skipped_short_collection(info):
+            return (
+                int(info.get("usage", 0) or 0) == 0x0001
+                and (info.get("product_id", 0), info.get("product_string"))
+                in receiver_long_collections
+            )
+
         # REPROG_V4-absent cooldown (issue #238): skip interfaces that recently
         # opened but exposed no REPROG_V4, so a stable set of incompatible
         # interfaces is not re-probed on every pass. Never skip when *all*
-        # candidates are cooling down, so a sole (e.g. just-woken) device is
+        # probeable candidates are cooling down, so a sole (e.g. just-woken) device is
         # still probed; the connect backoff throttles that case instead.
+        probeable = [info for info in infos if not _is_skipped_short_collection(info)]
         now = time.monotonic()
         self._reprog_absent_until = {
             k: t for k, t in self._reprog_absent_until.items() if t > now
         }
         cooled = {
             _candidate_cooldown_key(info)
-            for info in infos
+            for info in probeable
             if _candidate_cooldown_key(info) in self._reprog_absent_until
         }
-        skip_cooled = bool(cooled) and len(cooled) < len(infos)
-        # Receivers whose long-report collection (usage 0x0002) opened fine
-        # this pass but answered no probe. Requests only travel as long
-        # reports, so their short-report collection (usage 0x0001) cannot
-        # succeed either; probing it would just double the time a pass
-        # spends waiting on a mouse that is asleep.
-        long_probed_silent = set()
+        skip_cooled = bool(cooled) and len(cooled) < len(probeable)
 
         for info in infos:
             cand_key = _candidate_cooldown_key(info)
@@ -3176,11 +3192,11 @@ class HidGestureListener:
             usage = info.get("usage", 0)
             product = info.get("product_string")
             source = info.get("source", "unknown")
-            if int(usage or 0) == 0x0001 and (pid, product) in long_probed_silent:
+            if _is_skipped_short_collection(info):
                 print(
                     "[HidGesture] Skipping short-report collection of "
-                    f"PID=0x{int(pid or 0):04X} (its long-report collection "
-                    "answered no probe this pass)"
+                    f"PID=0x{int(pid or 0):04X} (requests only fit its "
+                    "long-report collection)"
                 )
                 continue
             # Snapshot before inner branches rebind `info` to HID++ responses.
@@ -3320,6 +3336,14 @@ class HidGestureListener:
                         tuple(i for i in idx_order if i in answered)
                         + tuple(i for i in idx_order if i not in answered)
                     )
+                elif cached_dev_idx is not None:
+                    # Nothing answered a full window: the mouse is asleep
+                    # or not re-linked yet. Give the slot it lives in one
+                    # more wake-up window and let the next pass broadcast
+                    # again, instead of walking five empty slots first.
+                    print("[HidGesture] No slot answered the broadcast probe; "
+                          f"re-probing cached devIdx=0x{cached_dev_idx:02X} only")
+                    idx_order = (cached_dev_idx,)
             reprog_found = False
             hidpp_name = None
             for idx in idx_order:
@@ -3335,7 +3359,7 @@ class HidGestureListener:
                     self._stray_reply = None
                     if (
                         stray_feat == 0x00 and stray_params and stray_params[0] != 0
-                        and stray_dev in idx_order
+                        and stray_dev in default_idx_order
                     ):
                         print(f"[HidGesture] Late IRoot reply from devIdx=0x{stray_dev:02X} "
                               f"while probing devIdx=0x{idx:02X}; re-probing it")
@@ -3572,8 +3596,6 @@ class HidGestureListener:
                 self._reprog_absent_until[cand_key] = (
                     time.monotonic() + self._REPROG_ABSENT_COOLDOWN_S
                 )
-                if opened_usage == 0x0002 and "receiver" in (product or "").lower():
-                    long_probed_silent.add((pid, product))
 
             # Couldn't use this interface -- close and try next
             try:

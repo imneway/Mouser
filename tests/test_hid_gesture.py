@@ -372,6 +372,76 @@ class HidDiscoveryDiagnosticsTests(unittest.TestCase):
             for m in self._printed_messages(print_mock)
         ))
 
+    def _receiver_collections(self):
+        receiver = {
+            "product_id": hid_gesture.BOLT_RECEIVER_PID,
+            "usage_page": 0xFF00,
+            "transport": None,
+            "source": "hidapi-enumerate",
+            "product_string": "USB Receiver",
+        }
+        return (dict(receiver, usage=0x0002, path=b"col02"),
+                dict(receiver, usage=0x0001, path=b"col01"))
+
+    def _connect_patches(self, listener, infos, opened_paths, cache=None):
+        def _device():
+            dev = _FakeHidDevice()
+            dev.open_path = Mock(side_effect=opened_paths.append)
+            return dev
+        return (
+            patch.object(listener, "_vendor_hid_infos", return_value=list(infos)),
+            patch.object(listener, "_broadcast_probe", return_value={}),
+            patch.object(listener, "_find_feature", return_value=None),
+            patch.object(hid_gesture, "_load_last_device_cache", return_value=cache),
+            patch.object(hid_gesture, "HIDAPI_OK", True),
+            patch.object(hid_gesture, "_BACKEND_PREFERENCE", "hidapi"),
+            patch.object(hid_gesture, "_HID_API_STYLE", "hidapi"),
+            patch.object(hid_gesture, "_hid", SimpleNamespace(device=_device), create=True),
+            patch("builtins.print"),
+        )
+
+    def test_cooling_long_collection_is_reprobed_instead_of_its_short_twin(self):
+        # Pass 1 left the long-report collection cooling down (no slot
+        # answered). Pass 2 must open it again rather than spend a round on
+        # the short-report collection, which cannot carry a request at all.
+        listener = hid_gesture.HidGestureListener()
+        long_col, short_col = self._receiver_collections()
+        opened_paths = []
+        patches = self._connect_patches(listener, [long_col, short_col], opened_paths)
+        with patches[0], patches[1], patches[2], patches[3], patches[4],                 patches[5], patches[6], patches[7], patches[8]:
+            self.assertFalse(listener._try_connect())
+            self.assertTrue(listener._reprog_absent_until)   # long_col cooling
+            self.assertFalse(listener._try_connect())
+        self.assertEqual(opened_paths, [b"col02", b"col02"])
+
+    def test_silent_broadcast_reprobes_only_the_cached_slot(self):
+        # The receiver is back after a KVM switch but the mouse has not
+        # re-linked: nothing answers the broadcast. Only the cached slot
+        # gets the per-slot retry; the next pass broadcasts again.
+        listener = hid_gesture.HidGestureListener()
+        long_col, _short = self._receiver_collections()
+        cache = {
+            "candidate": {"pid": hid_gesture.BOLT_RECEIVER_PID, "usage_page": 0xFF00,
+                          "usage": 0x0002, "source": "hidapi-enumerate", "path": ""},
+            "device": {"dev_idx": 1, "name": "MX Master 3S"},
+        }
+        probed = []
+        patches = self._connect_patches(listener, [long_col], [], cache)
+        with patches[0], patches[1], patches[3], patches[4], patches[5],                 patches[6], patches[7], patches[8],                 patch.object(listener, "_find_feature",
+                             side_effect=lambda *a, **k: probed.append(listener._dev_idx)):
+            self.assertFalse(listener._try_connect())
+        self.assertEqual(probed, [1])
+
+    def test_silent_broadcast_without_cache_still_walks_every_slot(self):
+        listener = hid_gesture.HidGestureListener()
+        long_col, _short = self._receiver_collections()
+        probed = []
+        patches = self._connect_patches(listener, [long_col], [])
+        with patches[0], patches[1], patches[3], patches[4], patches[5],                 patches[6], patches[7], patches[8],                 patch.object(listener, "_find_feature",
+                             side_effect=lambda *a, **k: probed.append(listener._dev_idx)):
+            self.assertFalse(listener._try_connect())
+        self.assertEqual(probed, [1, 2, 3, 4, 5, 6])
+
     def test_try_connect_logs_linux_hid_path_access_before_open(self):
         listener, info = self._make_listener()
         fake_dev = _FakeHidDevice()
