@@ -115,3 +115,7 @@ PC 端相关资料：PC 安装在 `C:\Program Files\Utilities\Mouser`（计划�
 - `stop()`：先停工作线程（把队列里剩下的松键处理完）→ `_end_precision_drag()` → `_stop_hid_listener()`；`_reinstall_hook()`（插拔重装钩子）投递一个 `("end",)` 兜底松开。
 - 测试：`tests/test_windows_hook_source.py` 新增 `PrecisionDragWindowsTests`（9 个，仅 Windows 跑）：Alt 拖动/松开、拖动中按下/松开修饰键、Mac 名字映射、注入事件忽略、钩子线程本身不写 HID、重装钩子兜底、stop 顺序、工作线程按序处理。
 - 注意：用户的 PC 键盘是 Magic Keyboard 经 KVM，Windows 下 ⌘ 实际发 Win 键、⌥ 是 Alt、⌃ 是 Ctrl；默认选 Ctrl，用户想按 ⌘ 的话在设置里选 Win 即可。
+
+### Mac 端进度（续）
+
+- 2026-10-12 切回提速（fe6019d / 148e9bd / 2c78009 / febc62d）：① Mac 事件 tap 原来在"未连接就放行"判断之后才调 `note_pointer_activity()`，所以断开时晃鼠标叫不醒重连（PC 端顺序本来就对），已挪到判断前；② 重连成功后监听线程自己先排队写"最新想要的 DPI"，第一轮循环就写，不再等引擎回放；③ 引擎回放改成先写 DPI 再写 Smart Shift；④ Codex 发现 ② 引入的竞态：DPI 读写共用一个完成信号，旧写入完成时会把新请求当成已完成清掉。加了请求编号 `_dpi_req_gen`，只有编号对得上才算完成；断开期间设置的 DPI 记为最新想要值。日志关键字：`Re-applying DPI … on reconnect`。②③④ 是跨平台的，PC 拉代码即可。
