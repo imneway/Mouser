@@ -129,3 +129,4 @@ PC 端相关资料：PC 安装在 `C:\Program Files\Utilities\Mouser`（计划�
 ### Mac 端进度（2026-10-13）
 
 - 2026-10-13 息屏唤醒 DPI 丢失（e0712b3）：息屏期间鼠标自己深度休眠并完全重置（探测时 divert 状态全是 none），重连时写的 DPI 被确认但几秒内又丢，原先第一次回读在 15 s，用户有约 16 s 停在 1000。改成连上后 4 / 15 / 150 s 三次回读，且连上 2 s 后第一次移动指针也回读一次（`notify_user_input` 已连接分支，`_verify_on_input_after`）；回读撞上排队中的 DPI 写入时改成推迟到下一轮而不是丢掉；就地唤醒（`Device woke from sleep`）分支也同样布防。跨平台，PC 拉代码即可。
+- 2026-10-14 SteerMouse 把鼠标认成「USB Receiver」（7855a9f）：根因是 Mouser 用 hidapi 打开接收器时是独占的——macOS 上 hidapi 默认 seize，而原来的 `hasattr(_hid, "hid_darwin_set_open_exclusive")` 守卫在 cython-hidapi 0.15 上永远是 False（Python 封装没露出这个函数），所以 SteerMouse 问不到 HID++ 设备名。现在用 ctypes 直接调 `.so` 里导出的 `hid_darwin_set_open_exclusive(0)`（`HIDAPI_MAC_SHARED` 记录是否成功）。另外 IOKit 路径之前只在 hidapi 恰好把 0xFF00/0x0001 排在前面时才命中（IOKit 按主 usage 0x0001 建设备，hidapi 枚举两个 collection 顺序随机），现在精确匹配失败后再按 usage page 匹配一次（`_open_attempts_for`），匹配到多台同型号接收器时放弃交给 hidapi。真机验证：Mouser 运行时外部进程已能共享打开 0xFF00 接口。Windows 不受影响。
