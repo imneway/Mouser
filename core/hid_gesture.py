@@ -1130,6 +1130,7 @@ class HidGestureListener:
         self._verify_requested = False         # re-check device state (power-cycle detection)
         self._last_verify_time = 0.0
         self._followup_verify_at = []          # monotonic deadlines armed after each connect
+        self._verify_on_input_after = None     # monotonic time; first pointer motion past it verifies state
         # Bumped by every queued DPI write/read; a pass that finishes after a
         # newer request was queued must neither clear it nor signal it done.
         self._dpi_req_gen = 0
@@ -2121,14 +2122,22 @@ class HidGestureListener:
     # A DPI write right after (re)connect can be acknowledged and still not
     # stick: seen twice on an MX Master 3S behind a KVM, where the mouse
     # reported the firmware default again 1-2 minutes after the receiver came
-    # back, with no link event in between. Re-check a couple of times after
-    # every connect instead of waiting for the next broadcast or idle gap.
-    _POST_CONNECT_VERIFY_DELAYS_S = (15.0, 150.0)
+    # back, with no link event in between; and after a display sleep, where
+    # the mouse had fully reset and reported 1000 again within 15 s of an
+    # acknowledged write. Re-check a few times after every connect instead of
+    # waiting for the next broadcast or idle gap, starting early enough that
+    # the user barely notices.
+    _POST_CONNECT_VERIFY_DELAYS_S = (4.0, 15.0, 150.0)
+    # The first pointer motion this long after a connect also triggers a
+    # verify: it proves the mouse is awake and the reconnect DPI write (queued
+    # at connect, applied within ~1 s) has already gone out.
+    _POST_CONNECT_INPUT_VERIFY_GRACE_S = 2.0
 
     def _arm_post_connect_verifies(self, now=None):
         if now is None:
             now = time.monotonic()
         self._followup_verify_at = [now + d for d in self._POST_CONNECT_VERIFY_DELAYS_S]
+        self._verify_on_input_after = now + self._POST_CONNECT_INPUT_VERIFY_GRACE_S
 
     def _pop_due_followup_verify(self, now=None):
         """True once per armed deadline that has passed; the listener loop
@@ -2156,8 +2165,11 @@ class HidGestureListener:
             return
         # A write that failed while the mouse dozed holds the newest wanted
         # value; never let an older acknowledged one win over it. A write
-        # already queued is applied right after this check anyway.
+        # already queued is applied right after this check, so defer the
+        # verify to the next loop pass rather than drop it: a one-shot
+        # trigger (post-connect motion) would otherwise never be retried.
         if self._pending_dpi is not None and self._pending_dpi != "read":
+            self._verify_requested = True
             return
         # A precision-drag shift is deliberately not the saved DPI; unshift
         # arms its own follow-up verify.
@@ -3631,8 +3643,16 @@ class HidGestureListener:
         movement proves the mouse is awake: cut the backoff short so the
         next probe runs right away. Cheap enough for the per-move hot path
         (two attribute reads while connected); rate-limited to one wake per
-        2 s so a probe already in flight isn't followed by a burst of them."""
+        2 s so a probe already in flight isn't followed by a burst of them.
+
+        While connected, the first motion after the post-connect grace period
+        asks the listener loop for one state verify (see
+        _arm_post_connect_verifies)."""
         if self._connected:
+            due = self._verify_on_input_after
+            if due is not None and time.monotonic() >= due:
+                self._verify_on_input_after = None
+                self._verify_requested = True
             return
         now = time.monotonic()
         if now - self._last_input_wake < 2.0:
@@ -3728,6 +3748,10 @@ class HidGestureListener:
                                     pass
                             print("[HidGesture] Device woke from sleep")
                             self._on_report(raw)
+                            # Same follow-up checks as after a full reconnect:
+                            # a write right after the wake can be acked and
+                            # still lost.
+                            self._arm_post_connect_verifies()
                             if self._dpi_reapply_on_wake is not None and self._pending_dpi is None:
                                 print(f"[HidGesture] Re-applying DPI {self._dpi_reapply_on_wake} after wake")
                                 self._pending_dpi = self._dpi_reapply_on_wake

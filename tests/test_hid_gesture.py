@@ -1854,12 +1854,59 @@ class PostConnectVerifyTests(unittest.TestCase):
     def test_each_armed_deadline_fires_once_in_order(self):
         listener = hid_gesture.HidGestureListener()
         listener._arm_post_connect_verifies(now=100.0)
-        first, second = listener._POST_CONNECT_VERIFY_DELAYS_S
-        self.assertFalse(listener._pop_due_followup_verify(now=100.0 + first - 1))
-        self.assertTrue(listener._pop_due_followup_verify(now=100.0 + first))
-        self.assertFalse(listener._pop_due_followup_verify(now=100.0 + first))
-        self.assertTrue(listener._pop_due_followup_verify(now=100.0 + second))
-        self.assertFalse(listener._pop_due_followup_verify(now=100.0 + second + 999))
+        delays = listener._POST_CONNECT_VERIFY_DELAYS_S
+        self.assertEqual(delays, tuple(sorted(delays)))
+        for d in delays:
+            self.assertFalse(listener._pop_due_followup_verify(now=100.0 + d - 1))
+            self.assertTrue(listener._pop_due_followup_verify(now=100.0 + d))
+            self.assertFalse(listener._pop_due_followup_verify(now=100.0 + d))
+        self.assertFalse(listener._pop_due_followup_verify(now=100.0 + delays[-1] + 999))
+
+    def test_first_check_runs_within_seconds_of_connect(self):
+        # A display-sleep reset showed DPI 1000 again within 15 s of an
+        # acknowledged write; the first re-check must come well before that.
+        self.assertLessEqual(hid_gesture.HidGestureListener._POST_CONNECT_VERIFY_DELAYS_S[0], 5.0)
+
+    def test_first_motion_after_grace_requests_one_verify(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._connected = True
+        listener._arm_post_connect_verifies(now=100.0)
+        grace = listener._POST_CONNECT_INPUT_VERIFY_GRACE_S
+        with patch.object(hid_gesture.time, "monotonic", return_value=100.0 + grace - 0.5):
+            listener.notify_user_input()
+        self.assertFalse(listener._verify_requested)
+        with patch.object(hid_gesture.time, "monotonic", return_value=100.0 + grace):
+            listener.notify_user_input()
+        self.assertTrue(listener._verify_requested)
+        listener._verify_requested = False
+        with patch.object(hid_gesture.time, "monotonic", return_value=100.0 + grace + 60):
+            listener.notify_user_input()
+        self.assertFalse(listener._verify_requested)
+        self.assertFalse(listener._wake_event.is_set())
+
+    def test_verify_is_deferred_not_dropped_while_a_write_is_queued(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._dpi_idx = 0x0D
+        listener._dev = object()
+        listener._last_dpi_set = 3200
+        listener._pending_dpi = 3200
+        listener._verify_requested = False
+        with patch.object(listener, "_request") as req:
+            listener._verify_device_state()
+        req.assert_not_called()
+        self.assertTrue(listener._verify_requested)
+
+    def test_reconnect_rearms_motion_verify(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._connected = True
+        listener._arm_post_connect_verifies(now=100.0)
+        with patch.object(hid_gesture.time, "monotonic", return_value=200.0):
+            listener.notify_user_input()
+        listener._verify_requested = False
+        listener._arm_post_connect_verifies(now=300.0)
+        with patch.object(hid_gesture.time, "monotonic", return_value=300.0 + listener._POST_CONNECT_INPUT_VERIFY_GRACE_S):
+            listener.notify_user_input()
+        self.assertTrue(listener._verify_requested)
 
     def test_reconnect_rearms_from_scratch(self):
         listener = hid_gesture.HidGestureListener()
