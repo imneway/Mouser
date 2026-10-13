@@ -1846,6 +1846,40 @@ class HidReconnectStormTests(unittest.TestCase):
         self.assertFalse(listener._wake_event.is_set())
 
 
+class MacOpenAttemptOrderTests(unittest.TestCase):
+    """On macOS the IOKit (shared) backend must get a usage-page-only retry
+    before hidapi, whose open seizes the interface and locks other HID++
+    clients such as SteerMouse out of the receiver."""
+
+    def _attempts(self, info):
+        with patch.object(hid_gesture.sys, "platform", "darwin"), \
+             patch.object(hid_gesture, "_MAC_NATIVE_OK", True), \
+             patch.object(hid_gesture, "_BACKEND_PREFERENCE", "auto"):
+            return hid_gesture.HidGestureListener._open_attempts_for(info, 0xC548)
+
+    def test_usage_page_retry_comes_before_hidapi(self):
+        info = {"product_id": 0xC548, "usage_page": 0xFF00, "usage": 0x0002,
+                "transport": "", "path": b"DevSrvsID:1"}
+        attempts = self._attempts(info)
+        backends = [b for b, _ in attempts]
+        self.assertEqual(backends, ["iokit-exact", "iokit-exact", "iokit-ble", "hidapi"])
+        self.assertEqual(attempts[0][1]["usage"], 0x0002)
+        self.assertEqual(attempts[1][1]["usage"], 0)
+        self.assertEqual(attempts[1][1]["usage_page"], 0xFF00)
+
+    def test_no_retry_when_candidate_has_no_usage(self):
+        info = {"product_id": 0xC548, "usage_page": 0xFF00, "usage": 0,
+                "transport": "USB", "path": b"DevSrvsID:1"}
+        backends = [b for b, _ in self._attempts(info)]
+        self.assertEqual(backends, ["iokit-exact", "hidapi"])
+
+    def test_bluetooth_candidate_skips_exact_match(self):
+        info = {"product_id": 0xB034, "usage_page": 0xFF00, "usage": 0x0001,
+                "transport": "Bluetooth Low Energy", "path": b"x"}
+        backends = [b for b, _ in self._attempts(info)]
+        self.assertEqual(backends, ["iokit-ble", "hidapi"])
+
+
 class PostConnectVerifyTests(unittest.TestCase):
     """After every connect the listener re-checks the device state a couple of
     times, because a DPI write acknowledged right after reconnect can still be

@@ -49,8 +49,28 @@ try:
     HIDAPI_OK = True
     HIDAPI_IMPORT_ERROR = None
     # On macOS, allow non-exclusive HID access so the mouse keeps working
-    if sys.platform == "darwin" and hasattr(_hid, "hid_darwin_set_open_exclusive"):
-        _hid.hid_darwin_set_open_exclusive(0)
+    # and other HID++ clients (SteerMouse resolves the mouse name over the
+    # same receiver interface) are not locked out. hidapi seizes the device
+    # by default on macOS.
+    HIDAPI_MAC_SHARED = None
+    if sys.platform == "darwin":
+        _set_excl = getattr(_hid, "hid_darwin_set_open_exclusive", None)
+        if _set_excl is not None:
+            _set_excl(0)
+            HIDAPI_MAC_SHARED = True
+        else:
+            # cython-hidapi does not wrap the call, but the statically linked
+            # hidapi exports it: reach it through ctypes on the loaded image.
+            try:
+                import ctypes as _ctypes
+                _hid_lib = _ctypes.CDLL(_hid.__file__)
+                _hid_lib.hid_darwin_set_open_exclusive.argtypes = [_ctypes.c_int]
+                _hid_lib.hid_darwin_set_open_exclusive.restype = None
+                _hid_lib.hid_darwin_get_open_exclusive.restype = _ctypes.c_int
+                _hid_lib.hid_darwin_set_open_exclusive(0)
+                HIDAPI_MAC_SHARED = _hid_lib.hid_darwin_get_open_exclusive() == 0
+            except (OSError, AttributeError):
+                HIDAPI_MAC_SHARED = False
 except Exception as exc:
     HIDAPI_OK = False
     HIDAPI_IMPORT_ERROR = exc
@@ -672,6 +692,14 @@ if _MAC_NATIVE_OK:
                 count = _cf.CFSetGetCount(devices)
                 if count <= 0:
                     raise OSError(self._describe_match_failure())
+                if count > 1:
+                    # Two receivers with the same PID: the match cannot tell
+                    # which one the candidate meant, so let the caller fall
+                    # back to the path-addressed hidapi open.
+                    raise OSError(
+                        f"{count} IOHIDDevices match PID 0x{self._product_id:04X}; "
+                        "ambiguous, leaving to the path-based backend"
+                    )
                 values_buf = (c_void_p * count)()
                 _cf.CFSetGetValues(devices, values_buf)
                 self._device = _cf.CFRetain(values_buf[0])
@@ -3090,6 +3118,40 @@ class HidGestureListener:
 
     # ── connect / main loop ───────────────────────────────────────
 
+    @staticmethod
+    def _open_attempts_for(info, pid):
+        """Ordered (backend, open_info) pairs to try for one candidate."""
+        open_attempts = []
+        candidate_transport = (info.get("transport") or "").lower()
+        is_bt_candidate = "bluetooth" in candidate_transport
+        # On macOS, prefer IOKit (non-exclusive access) over hidapi
+        # which may lock the device and freeze the cursor.
+        if (
+            sys.platform == "darwin"
+            and _MAC_NATIVE_OK
+            and _BACKEND_PREFERENCE in ("auto", "iokit")
+        ):
+            if not is_bt_candidate:
+                open_attempts.append(("iokit-exact", info))
+                if int(info.get("usage", 0) or 0):
+                    # hidapi lists every top-level collection of the receiver
+                    # (0xFF00/0x0001 and 0xFF00/0x0002) while IOKit exposes one
+                    # IOHIDDevice keyed by its primary usage, so whichever
+                    # collection is enumerated first decides whether the exact
+                    # match hits. Retry on the usage page alone before falling
+                    # back to hidapi.
+                    open_attempts.append(("iokit-exact", {**info, "usage": 0}))
+            if is_bt_candidate or not candidate_transport:
+                open_attempts.append(("iokit-ble", {
+                    "product_id": pid,
+                    "usage_page": 0,
+                    "usage": 0,
+                    "transport": "Bluetooth Low Energy",
+                }))
+        if _BACKEND_PREFERENCE in ("auto", "hidapi") and info.get("path"):
+            open_attempts.append(("hidapi", info))
+        return open_attempts
+
     def _try_connect(self):
         """Open the vendor HID collection, discover features, divert.
 
@@ -3245,27 +3307,7 @@ class HidGestureListener:
             opened_up = int(up or 0)
             opened_usage = int(usage or 0)
             opened_path = ""
-            open_attempts = []
-            candidate_transport = (info.get("transport") or "").lower()
-            is_bt_candidate = "bluetooth" in candidate_transport
-            # On macOS, prefer IOKit (non-exclusive access) over hidapi
-            # which may lock the device and freeze the cursor.
-            if (
-                sys.platform == "darwin"
-                and _MAC_NATIVE_OK
-                and _BACKEND_PREFERENCE in ("auto", "iokit")
-            ):
-                if not is_bt_candidate:
-                    open_attempts.append(("iokit-exact", info))
-                if is_bt_candidate or not candidate_transport:
-                    open_attempts.append(("iokit-ble", {
-                        "product_id": pid,
-                        "usage_page": 0,
-                        "usage": 0,
-                        "transport": "Bluetooth Low Energy",
-                    }))
-            if _BACKEND_PREFERENCE in ("auto", "hidapi") and info.get("path"):
-                open_attempts.append(("hidapi", info))
+            open_attempts = self._open_attempts_for(info, pid)
 
             for transport, open_info in open_attempts:
                 try:
