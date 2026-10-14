@@ -154,26 +154,48 @@ class PrecisionDragWindowsTests(unittest.TestCase):
         self.held = {self.mhw.VK_CONTROL, self.mhw.VK_MENU}
         self.assertFalse(self.hook._precision_modifier_down())
 
-    def test_win_drag_masks_start_menu_before_win_is_released(self):
+    def test_win_drag_masks_start_menu_when_win_is_released(self):
         self.hook.configure_precision_drag(True, "win", 300, lambda: 3600)
-        with patch.object(self.mhw, "_send_key_press") as send:
+
+        def win_up(vk=None):
+            data = self.mhw.KBDLLHOOKSTRUCT()
+            data.vkCode = vk or self.mhw.VK_LWIN
+            data.flags = self.mhw.LLKHF_UP
+            self.hook._keyboard_handler(
+                self.mhw.HC_ACTION, 0x0101, self.mhw.ctypes.pointer(data)
+            )
+
+        with patch.object(self.mhw, "_send_key_press") as send, \
+                patch.object(self.mhw, "CallNextKeyboardHookEx", return_value=0):
+            # A Win tap with no drag is left alone (it should open Start).
+            win_up()
+            send.assert_not_called()
             self.held.add(self.mhw.VK_LWIN)
             self._send(self.mhw.WM_LBUTTONDOWN)
-            send.assert_called_once_with(self.mhw.VK_START_MENU_MASK)
+            # Nothing is tapped at drag start: a held Win key auto-repeats
+            # and every repeat makes Windows forget it. Only the release.
+            send.assert_not_called()
             self._send(self.mhw.WM_LBUTTONUP)
-            send.assert_called_once()
-            # Win pressed only once the drag is under way masks as well.
             self.held.clear()
+            win_up()
+            send.assert_called_once_with(self.mhw.VK_START_MENU_MASK)
+            win_up()
+            send.assert_called_once()  # armed once per drag
+            # Win pressed only once the drag is under way arms as well.
             self._send(self.mhw.WM_LBUTTONDOWN)
             self.held.add(self.mhw.VK_RWIN)
             self._send(self.mhw.WM_MOUSEMOVE)
+            self.held.clear()
+            win_up(self.mhw.VK_RWIN)
             self.assertEqual(send.call_count, 2)
             self._send(self.mhw.WM_LBUTTONUP)
-            # Any other modifier never injects a key.
+            # Any other modifier never arms the mask.
             send.reset_mock()
             self.hook.configure_precision_drag(True, "alt", 300, lambda: 3600)
             self.held = {self.mhw.VK_MENU}
             self._send(self.mhw.WM_LBUTTONDOWN)
+            self._send(self.mhw.WM_LBUTTONUP)
+            win_up()
             send.assert_not_called()
 
     def test_injected_events_are_ignored(self):

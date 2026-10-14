@@ -101,10 +101,50 @@ VK_MENU = 0x12
 VK_LWIN = 0x5B
 VK_RWIN = 0x5C
 # Unassigned virtual key. Windows opens the Start menu when the Win key is
-# released with no other key pressed in between, and a mouse click alone does
-# not stop it; tapping this key while Win is still down does, without any app
-# seeing a real keystroke.
+# released with no other key pressed since its *last* key-down, and a mouse
+# click alone does not stop it. A held Win key auto-repeats its key-down every
+# ~30 ms, so the tap has to happen right as Win goes up: tapping it at the
+# start of the drag is forgotten by the next repeat. No app sees a real
+# keystroke from it.
 VK_START_MENU_MASK = 0xE8
+LLKHF_UP = 0x80
+WH_KEYBOARD_LL = 13
+# Thread message asking the hook thread to (un)install the keyboard hook.
+WM_MOUSER_SYNC_KBD_HOOK = 0x8000 + 0x11  # WM_APP + 0x11
+
+
+class KBDLLHOOKSTRUCT(Structure):
+    _fields_ = [
+        ("vkCode", wintypes.DWORD),
+        ("scanCode", wintypes.DWORD),
+        ("flags", wintypes.DWORD),
+        ("time", wintypes.DWORD),
+        ("dwExtraInfo", wintypes.WPARAM),
+    ]
+
+
+KBDHOOKPROC = CFUNCTYPE(
+    ctypes.c_long,
+    c_int,
+    wintypes.WPARAM,
+    ctypes.POINTER(KBDLLHOOKSTRUCT),
+)
+
+# ctypes keeps one function object per WinDLL attribute, and the mouse hook
+# above already typed SetWindowsHookExW / CallNextHookEx for MSLLHOOKSTRUCT;
+# a second WinDLL instance gives the keyboard hook its own typed copies.
+_user32_kbd = ctypes.WinDLL("user32")
+SetWindowsKeyboardHookExW = _user32_kbd.SetWindowsHookExW
+SetWindowsKeyboardHookExW.restype = wintypes.HHOOK
+SetWindowsKeyboardHookExW.argtypes = [c_int, KBDHOOKPROC, wintypes.HINSTANCE, wintypes.DWORD]
+CallNextKeyboardHookEx = _user32_kbd.CallNextHookEx
+CallNextKeyboardHookEx.restype = ctypes.c_long
+CallNextKeyboardHookEx.argtypes = [
+    wintypes.HHOOK,
+    c_int,
+    wintypes.WPARAM,
+    ctypes.POINTER(KBDLLHOOKSTRUCT),
+]
 
 # Precision-drag modifier -> virtual keys sampled with GetAsyncKeyState. The
 # macOS names map onto the closest PC key so a config written there still
@@ -291,6 +331,11 @@ class MouseHook(BaseMouseHook):
         self._precision_vks = _PRECISION_VKS["control"]
         self._precision_queue = queue.Queue()
         self._precision_thread = None
+        # Keyboard hook, installed only while the modifier is Win: it taps
+        # the Start-menu mask as the key goes up after a Win+drag.
+        self._kbd_hook = None
+        self._kbd_hook_proc = None
+        self._win_drag_used = False
         # Per-button slide gesture: last cursor position while an owner button
         # is held, to derive per-move deltas from the LL hook's absolute point.
         self._btn_gesture_last_x = 0
@@ -543,6 +588,9 @@ class MouseHook(BaseMouseHook):
         super().configure_precision_drag(
             enabled, modifier=modifier, dpi=dpi, base_dpi_provider=base_dpi_provider
         )
+        # Hooks belong to the hook thread; it syncs on the next pass.
+        if self._thread_id:
+            PostThreadMessageW(self._thread_id, WM_MOUSER_SYNC_KBD_HOOK, 0, 0)
 
     def _precision_modifier_down(self):
         for vk in self._precision_vks:
@@ -550,19 +598,51 @@ class MouseHook(BaseMouseHook):
                 return True
         return False
 
-    def _mask_start_menu(self):
-        """A Win+drag must not pop the Start menu when Win is let go."""
+    def _arm_start_menu_mask(self):
+        """A Win+drag must not pop the Start menu when Win is let go: the
+        keyboard hook taps the mask on that release."""
         if self._precision_enabled and self._precision_modifier == "win":
-            _send_key_press(VK_START_MENU_MASK)
+            self._win_drag_used = True
+
+    def _sync_keyboard_hook(self):
+        """Hook thread only: keep the keyboard hook installed exactly while
+        the precision-drag rule asks for the Win key."""
+        want = self._precision_enabled and self._precision_modifier == "win"
+        if want and not self._kbd_hook:
+            self._kbd_hook_proc = KBDHOOKPROC(self._keyboard_handler)
+            self._kbd_hook = SetWindowsKeyboardHookExW(
+                WH_KEYBOARD_LL, self._kbd_hook_proc, GetModuleHandleW(None), 0
+            )
+            if self._kbd_hook:
+                print("[MouseHook] Keyboard hook installed (Win is the precision-drag modifier)")
+            else:
+                print("[MouseHook] Failed to install keyboard hook!")
+        elif not want and self._kbd_hook:
+            UnhookWindowsHookEx(self._kbd_hook)
+            self._kbd_hook = None
+            self._kbd_hook_proc = None
+            self._win_drag_used = False
+            print("[MouseHook] Keyboard hook removed")
+
+    def _keyboard_handler(self, nCode, wParam, lParam):
+        if nCode == HC_ACTION and self._win_drag_used:
+            data = lParam.contents
+            if data.vkCode in (VK_LWIN, VK_RWIN) and data.flags & LLKHF_UP:
+                self._win_drag_used = False
+                try:
+                    _send_key_press(VK_START_MENU_MASK)
+                except Exception as exc:
+                    print(f"[MouseHook] Start-menu mask failed: {exc}")
+        return CallNextKeyboardHookEx(None, nCode, wParam, lParam)
 
     def _process_precision_item(self, item):
         if item[0] == "button":
             if item[1] and item[2]:
-                self._mask_start_menu()
+                self._arm_start_menu_mask()
             self.precision_button(item[1], item[2])
         elif item[0] == "modifier":
             if item[1]:
-                self._mask_start_menu()
+                self._arm_start_menu_mask()
             self.precision_modifier(item[1])
         elif item[0] == "end":
             self._end_precision_drag()
@@ -792,6 +872,7 @@ class MouseHook(BaseMouseHook):
             return
         print("[MouseHook] Hook installed successfully")
         self._setup_raw_input()
+        self._sync_keyboard_hook()
         self._running = True
         self._startup_ok = True
         self._startup_event.set()
@@ -801,12 +882,19 @@ class MouseHook(BaseMouseHook):
             result = GetMessageW(ctypes.byref(message), None, 0, 0)
             if result == 0 or result == -1:
                 break
+            if not message.hWnd and message.message == WM_MOUSER_SYNC_KBD_HOOK:
+                self._sync_keyboard_hook()
+                continue
             TranslateMessage(ctypes.byref(message))
             DispatchMessageW(ctypes.byref(message))
 
         if self._ri_hwnd:
             DestroyWindow(self._ri_hwnd)
             self._ri_hwnd = None
+        if self._kbd_hook:
+            UnhookWindowsHookEx(self._kbd_hook)
+            self._kbd_hook = None
+            self._kbd_hook_proc = None
         if self._hook:
             UnhookWindowsHookEx(self._hook)
             self._hook = None
