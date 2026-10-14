@@ -25,6 +25,7 @@ from ctypes import (
 
 from core.key_simulator import MOUSEEVENTF_HWHEEL, MOUSEEVENTF_WHEEL
 from core.key_simulator import inject_scroll as _inject_scroll_impl
+from core.key_simulator import send_key_press as _send_key_press
 from core.mouse_hook_base import BaseMouseHook, HidGestureListener
 from core.mouse_hook_types import MouseEvent, hscroll_event_type
 
@@ -99,6 +100,11 @@ VK_CONTROL = 0x11
 VK_MENU = 0x12
 VK_LWIN = 0x5B
 VK_RWIN = 0x5C
+# Unassigned virtual key. Windows opens the Start menu when the Win key is
+# released with no other key pressed in between, and a mouse click alone does
+# not stop it; tapping this key while Win is still down does, without any app
+# seeing a real keystroke.
+VK_START_MENU_MASK = 0xE8
 
 # Precision-drag modifier -> virtual keys sampled with GetAsyncKeyState. The
 # macOS names map onto the closest PC key so a config written there still
@@ -544,10 +550,19 @@ class MouseHook(BaseMouseHook):
                 return True
         return False
 
+    def _mask_start_menu(self):
+        """A Win+drag must not pop the Start menu when Win is let go."""
+        if self._precision_enabled and self._precision_modifier == "win":
+            _send_key_press(VK_START_MENU_MASK)
+
     def _process_precision_item(self, item):
         if item[0] == "button":
+            if item[1] and item[2]:
+                self._mask_start_menu()
             self.precision_button(item[1], item[2])
         elif item[0] == "modifier":
+            if item[1]:
+                self._mask_start_menu()
             self.precision_modifier(item[1])
         elif item[0] == "end":
             self._end_precision_drag()
