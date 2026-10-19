@@ -1159,6 +1159,9 @@ class HidGestureListener:
         self._last_verify_time = 0.0
         self._followup_verify_at = []          # monotonic deadlines armed after each connect
         self._verify_on_input_after = None     # monotonic time; first pointer motion past it verifies state
+        self._last_input_at = 0.0              # monotonic time of the last pointer motion the hook reported
+        self._next_periodic_verify_at = None   # monotonic deadline of the next routine state check
+        self._periodic_verify_pending = False  # routine check due, waiting for fresh pointer motion
         # Bumped by every queued DPI write/read; a pass that finishes after a
         # newer request was queued must neither clear it nor signal it done.
         self._dpi_req_gen = 0
@@ -2160,24 +2163,41 @@ class HidGestureListener:
     # verify: it proves the mouse is awake and the reconnect DPI write (queued
     # at connect, applied within ~1 s) has already gone out.
     _POST_CONNECT_INPUT_VERIFY_GRACE_S = 2.0
+    # The DPI can also change with no link event at all while the mouse is
+    # in use (seen 2026-10-19: diverts and Smart Shift intact, DPI back at
+    # 1000, nothing in the log for 40 minutes). Read it back about once a
+    # minute, but only right after pointer motion: a dozing mouse would only
+    # time the request out (three of those drop the connection), and the next
+    # motion after an idle gap verifies anyway. A due check waits for motion.
+    _PERIODIC_VERIFY_S = 60.0
+    _PERIODIC_VERIFY_INPUT_FRESH_S = 1.5
 
     def _arm_post_connect_verifies(self, now=None):
         if now is None:
             now = time.monotonic()
         self._followup_verify_at = [now + d for d in self._POST_CONNECT_VERIFY_DELAYS_S]
         self._verify_on_input_after = now + self._POST_CONNECT_INPUT_VERIFY_GRACE_S
+        self._next_periodic_verify_at = now + self._PERIODIC_VERIFY_S
+        self._periodic_verify_pending = False
 
     def _pop_due_followup_verify(self, now=None):
-        """True once per armed deadline that has passed; the listener loop
+        """True once per armed deadline that has passed, and once per
+        periodic interval as soon as the pointer is moving; the listener loop
         turns that into a state verify."""
-        if not self._followup_verify_at:
-            return False
         if now is None:
             now = time.monotonic()
-        if now < self._followup_verify_at[0]:
-            return False
-        self._followup_verify_at.pop(0)
-        return True
+        if self._followup_verify_at and now >= self._followup_verify_at[0]:
+            self._followup_verify_at.pop(0)
+            return True
+        due = self._next_periodic_verify_at
+        if due is not None and now >= due:
+            self._next_periodic_verify_at = now + self._PERIODIC_VERIFY_S
+            self._periodic_verify_pending = True
+        if (self._periodic_verify_pending
+                and now - self._last_input_at <= self._PERIODIC_VERIFY_INPUT_FRESH_S):
+            self._periodic_verify_pending = False
+            return True
+        return False
 
     def request_state_verify(self):
         """Ask the listener loop to check whether the device lost its settings
@@ -2216,8 +2236,14 @@ class HidGestureListener:
             self._verify_requested = True
             return
         self._last_verify_time = now
+        gen = self._dpi_req_gen
         resp = self._request(self._dpi_idx, 2, [0x00])
         if not resp:
+            return
+        # A DPI write queued while the read was in flight carries the newer
+        # wanted value; it is applied right after this and must not be
+        # overwritten by a restore of the older one.
+        if gen != self._dpi_req_gen or self._pending_dpi is not None:
             return
         _, _, _, _, p = resp
         current = (p[1] << 8 | p[2]) if len(p) >= 3 else None
@@ -3689,14 +3715,16 @@ class HidGestureListener:
 
         While connected, the first motion after the post-connect grace period
         asks the listener loop for one state verify (see
-        _arm_post_connect_verifies)."""
+        _arm_post_connect_verifies), and every motion stamps _last_input_at
+        so the periodic verify only runs while the mouse is in use."""
+        now = time.monotonic()
+        self._last_input_at = now
         if self._connected:
             due = self._verify_on_input_after
-            if due is not None and time.monotonic() >= due:
+            if due is not None and now >= due:
                 self._verify_on_input_after = None
                 self._verify_requested = True
             return
-        now = time.monotonic()
         if now - self._last_input_wake < 2.0:
             return
         self._last_input_wake = now

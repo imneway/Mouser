@@ -1888,6 +1888,7 @@ class PostConnectVerifyTests(unittest.TestCase):
     def test_each_armed_deadline_fires_once_in_order(self):
         listener = hid_gesture.HidGestureListener()
         listener._arm_post_connect_verifies(now=100.0)
+        listener._next_periodic_verify_at = None   # routine checks tested separately
         delays = listener._POST_CONNECT_VERIFY_DELAYS_S
         self.assertEqual(delays, tuple(sorted(delays)))
         for d in delays:
@@ -1929,6 +1930,61 @@ class PostConnectVerifyTests(unittest.TestCase):
             listener._verify_device_state()
         req.assert_not_called()
         self.assertTrue(listener._verify_requested)
+
+    def test_periodic_verify_runs_each_minute_right_after_motion(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._arm_post_connect_verifies(now=100.0)
+        listener._followup_verify_at = []
+        period = listener._PERIODIC_VERIFY_S
+        listener._last_input_at = 100.0 + period - 0.5
+        self.assertFalse(listener._pop_due_followup_verify(now=100.0 + period - 1))
+        self.assertTrue(listener._pop_due_followup_verify(now=100.0 + period))
+        self.assertFalse(listener._pop_due_followup_verify(now=100.0 + period + 1))
+        listener._last_input_at = 100.0 + 2 * period - 1
+        self.assertTrue(listener._pop_due_followup_verify(now=100.0 + 2 * period))
+
+    def test_periodic_verify_waits_for_fresh_motion(self):
+        # Motion 10 s ago is not fresh enough: the mouse may already doze and
+        # a read would only time out. The check stays pending until motion.
+        listener = hid_gesture.HidGestureListener()
+        listener._arm_post_connect_verifies(now=100.0)
+        listener._followup_verify_at = []
+        period = listener._PERIODIC_VERIFY_S
+        listener._last_input_at = 100.0 + period - 10
+        self.assertFalse(listener._pop_due_followup_verify(now=100.0 + period))
+        self.assertTrue(listener._periodic_verify_pending)
+        self.assertFalse(listener._pop_due_followup_verify(now=100.0 + period + 20))
+        listener._last_input_at = 100.0 + period + 30
+        self.assertTrue(listener._pop_due_followup_verify(now=100.0 + period + 30.5))
+        self.assertFalse(listener._periodic_verify_pending)
+        # The next interval counts from the original deadline, not the motion.
+        listener._last_input_at = 100.0 + 2 * period
+        self.assertTrue(listener._pop_due_followup_verify(now=100.0 + 2 * period))
+
+    def test_verify_yields_to_a_write_queued_during_the_read(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._dpi_idx = 0x0D
+        listener._dev = object()
+        listener._last_dpi_set = 3200
+        listener._last_verify_time = 0.0
+
+        def read_then_queue(*_a, **_k):
+            listener._dpi_req_gen += 1
+            listener._pending_dpi = 1600
+            return (0x11, 0x01, 0x0D, 0x20, [0x00, 0x03, 0xE8])  # device says 1000
+
+        with patch.object(listener, "_request", side_effect=read_then_queue), \
+             patch.object(listener, "_divert") as divert:
+            listener._verify_device_state()
+        self.assertEqual(listener._pending_dpi, 1600)
+        divert.assert_not_called()
+
+    def test_motion_stamps_last_input_while_connected(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._connected = True
+        with patch.object(hid_gesture.time, "monotonic", return_value=500.0):
+            listener.notify_user_input()
+        self.assertEqual(listener._last_input_at, 500.0)
 
     def test_reconnect_rearms_motion_verify(self):
         listener = hid_gesture.HidGestureListener()
