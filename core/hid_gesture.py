@@ -1159,7 +1159,7 @@ class HidGestureListener:
         self._last_verify_time = 0.0
         self._external_write_seen = False      # another HID++ client changed DPI / diverts / Smart Shift
         self._external_write_retries = 0       # forced restores attempted for the current event
-        self._timed_out_writes = {}            # (feat, func) -> monotonic time of our own timed-out request
+        self._recent_own_tx = {}               # (feat, func) -> (monotonic time, params) of our last such request
         self._followup_verify_at = []          # monotonic deadlines armed after each connect
         self._verify_on_input_after = None     # monotonic time; first pointer motion past it verifies state
         self._last_input_at = 0.0              # monotonic time of the last pointer motion the hook reported
@@ -1486,6 +1486,11 @@ class HidGestureListener:
         for i, b in enumerate(params):
             if 4 + i < LONG_LEN:
                 buf[4 + i] = b & 0xFF
+        # Remember what we asked for: a reply to it that reaches _on_report
+        # (late, duplicated, or fire-and-forget) is ours, not another
+        # client's write -- see _note_external_write.
+        self._recent_own_tx[(int(feat), int(func))] = (
+            time.monotonic(), tuple(int(b) & 0xFF for b in params))
         with self._tx_lock:
             self._dev.write(buf)
 
@@ -1568,9 +1573,6 @@ class HidGestureListener:
             # button held-state tracking stays in sync during command exchanges.
             self._on_report(raw)
         self._consecutive_request_timeouts += 1
-        # Its reply may still arrive; _note_external_write must not take
-        # that late acknowledgement for another client's write.
-        self._timed_out_writes[(feat, func)] = time.monotonic()
         print(f"[HidGesture] request timeout feat=0x{feat:02X} func=0x{func:X} "
               f"devIdx=0x{self._dev_idx:02X} params=[{_hex_bytes(req_params)}] "
               f"(consecutive={self._consecutive_request_timeouts})")
@@ -3063,6 +3065,9 @@ class HidGestureListener:
                     except Exception:
                         pass
 
+    # How long after our own write its echo may still turn up at _on_report.
+    _OWN_REPLY_WINDOW_S = 10.0
+
     def _note_external_write(self, feat, func, sw, params):
         """Spot a reply to a settings write this process did not send.
 
@@ -3076,23 +3081,31 @@ class HidGestureListener:
         an immediate restore instead of waiting for the next timed check."""
         if sw == SHIFT_SW:
             return False
-        smart_shift_write_func = 2 if self._smart_shift_enhanced else 1
+        # Only the settings this app owns outright. Smart Shift is left out
+        # on purpose: another utility may switch the wheel mode on the
+        # user's behalf (a "switch wheel mode" button), and undoing that
+        # within a second would turn two tools into a tug of war. Our own
+        # per-app re-apply writes it again anyway.
         if feat == self._dpi_idx and self._dpi_idx is not None and func == 3:
             dpi = (params[1] << 8 | params[2]) if len(params) >= 3 else None
             what = f"DPI -> {dpi}"
+            echoed = 3          # reply echoes [sensorIdx, dpi hi, dpi lo]
         elif feat == self._feat_idx and self._feat_idx is not None and func == 3:
             cid = (params[0] << 8 | params[1]) if len(params) >= 2 else None
             what = f"button reporting 0x{cid:04X}" if cid is not None else "button reporting"
-        elif (feat == self._smart_shift_idx and self._smart_shift_idx is not None
-                and func == smart_shift_write_func):
-            what = "Smart Shift"
+            echoed = 5          # reply echoes [cid hi, cid lo, flags, remap hi, remap lo]
         else:
             return False
-        # A late acknowledgement of our own write that already timed out
-        # looks the same; nothing changed behind our back then.
-        timed_out_at = self._timed_out_writes.pop((feat, func), None)
-        if timed_out_at is not None and time.monotonic() - timed_out_at < 10.0:
-            return True
+        # A reply to a request we sent ourselves recently (late after a
+        # timeout, duplicated, or one _request did not wait for) carries the
+        # very values we wrote; nothing changed behind our back then. A
+        # different value inside the window is someone else's write.
+        own = self._recent_own_tx.get((feat, func))
+        if own is not None:
+            sent_at, sent_params = own
+            if (time.monotonic() - sent_at < self._OWN_REPLY_WINDOW_S
+                    and tuple(int(b) & 0xFF for b in params[:echoed]) == sent_params[:echoed]):
+                return True
         print(f"[HidGesture] External HID++ write seen ({what}, software-id "
               f"0x{sw:X}); restoring settings")
         if not self._external_write_seen:

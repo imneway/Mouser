@@ -1905,12 +1905,9 @@ class ExternalWriteTests(unittest.TestCase):
         listener._on_report(bytes([0x11, 0x01, 0x0D, 0x30 | hid_gesture.SHIFT_SW, 0x00, 0x03, 0xE8] + [0] * 13))
         self.assertFalse(listener._verify_requested)
 
-    def test_foreign_button_reporting_and_smart_shift_writes_request_restore(self):
+    def test_foreign_button_reporting_write_requests_restore(self):
         listener = self._listener()
         listener._on_report(bytes([0x11, 0x01, 0x09, 0x35, 0x00, 0xC3, 0x03, 0x00, 0x52] + [0] * 11))
-        self.assertTrue(listener._verify_requested)
-        listener = self._listener()
-        listener._on_report(bytes([0x11, 0x01, 0x0E, 0x15, 0x02, 0x10, 0x0A] + [0] * 13))
         self.assertTrue(listener._verify_requested)
 
     def test_dpi_read_reply_is_not_a_write(self):
@@ -1933,21 +1930,48 @@ class ExternalWriteTests(unittest.TestCase):
         self.assertEqual(listener._pending_dpi, 3200)
         self.assertFalse(listener._external_write_seen)
 
-    def test_late_ack_of_own_timed_out_write_is_not_foreign(self):
+    def test_reply_to_our_own_recent_request_is_not_foreign(self):
         listener = self._listener()
-        listener._timed_out_writes[(0x0D, 3)] = 10 ** 6
-        with patch.object(hid_gesture.time, "monotonic", return_value=10 ** 6 + 2):
+        listener._recent_own_tx[(0x0D, 3)] = (10 ** 6, (0x00, 0x0C, 0x80))
+        with patch.object(hid_gesture.time, "monotonic", return_value=10 ** 6 + 4):
             listener._on_report(bytes([0x11, 0x01, 0x0D, 0x3A, 0x00, 0x0C, 0x80] + [0] * 13))
         self.assertFalse(listener._verify_requested)
-        self.assertNotIn((0x0D, 3), listener._timed_out_writes)
-
-    def test_smart_shift_write_func_follows_feature_version(self):
-        listener = self._listener()
-        listener._smart_shift_enhanced = True
-        listener._on_report(bytes([0x11, 0x01, 0x0E, 0x15, 0x02, 0x10, 0x0A] + [0] * 13))
-        self.assertFalse(listener._verify_requested)   # func 1 is a read there
-        listener._on_report(bytes([0x11, 0x01, 0x0E, 0x25, 0x02, 0x10, 0x0A] + [0] * 13))
+        with patch.object(hid_gesture.time, "monotonic", return_value=10 ** 6 + 30):
+            listener._on_report(bytes([0x11, 0x01, 0x0D, 0x3A, 0x00, 0x0C, 0x80] + [0] * 13))
         self.assertTrue(listener._verify_requested)
+
+    def test_different_value_inside_own_window_is_foreign(self):
+        # We wrote 3200 two seconds ago; a reply echoing 1000 is not ours.
+        listener = self._listener()
+        listener._recent_own_tx[(0x0D, 3)] = (10 ** 6, (0x00, 0x0C, 0x80))
+        with patch.object(hid_gesture.time, "monotonic", return_value=10 ** 6 + 2):
+            listener._on_report(bytes([0x11, 0x01, 0x0D, 0x3A, 0x00, 0x03, 0xE8] + [0] * 13))
+        self.assertTrue(listener._verify_requested)
+
+    def test_other_cid_inside_own_window_is_foreign(self):
+        listener = self._listener()
+        listener._recent_own_tx[(0x09, 3)] = (10 ** 6, (0x00, 0xC3, 0x33, 0x00, 0x00))
+        with patch.object(hid_gesture.time, "monotonic", return_value=10 ** 6 + 1):
+            listener._on_report(bytes([0x11, 0x01, 0x09, 0x35, 0x00, 0xC3, 0x33, 0x00, 0x00] + [0] * 11))
+            self.assertFalse(listener._verify_requested)
+            listener._on_report(bytes([0x11, 0x01, 0x09, 0x35, 0x00, 0xC3, 0x03, 0x00, 0x52] + [0] * 11))
+            self.assertTrue(listener._verify_requested)
+
+    def test_tx_records_what_we_sent(self):
+        listener = self._listener()
+        listener._dev = Mock()
+        listener._dev.write = Mock(return_value=20)
+        with patch.object(hid_gesture.time, "monotonic", return_value=42.0):
+            listener._tx(hid_gesture.LONG_ID, 0x0D, 3, [0x00, 0x0C, 0x80])
+        self.assertEqual(listener._recent_own_tx.get((0x0D, 3)), (42.0, (0x00, 0x0C, 0x80)))
+
+    def test_foreign_smart_shift_write_is_left_alone(self):
+        listener = self._listener()
+        listener._on_report(bytes([0x11, 0x01, 0x0E, 0x15, 0x02, 0x10, 0x0A] + [0] * 13))
+        self.assertFalse(listener._verify_requested)
+        listener._smart_shift_enhanced = True
+        listener._on_report(bytes([0x11, 0x01, 0x0E, 0x25, 0x02, 0x10, 0x0A] + [0] * 13))
+        self.assertFalse(listener._verify_requested)
 
     def test_forced_restore_survives_a_failed_read_back(self):
         listener = self._listener()
