@@ -1157,6 +1157,9 @@ class HidGestureListener:
         self._last_smart_shift_req = None      # last Smart Shift tuple the device acknowledged
         self._verify_requested = False         # re-check device state (power-cycle detection)
         self._last_verify_time = 0.0
+        self._external_write_seen = False      # another HID++ client changed DPI / diverts / Smart Shift
+        self._external_write_retries = 0       # forced restores attempted for the current event
+        self._timed_out_writes = {}            # (feat, func) -> monotonic time of our own timed-out request
         self._followup_verify_at = []          # monotonic deadlines armed after each connect
         self._verify_on_input_after = None     # monotonic time; first pointer motion past it verifies state
         self._last_input_at = 0.0              # monotonic time of the last pointer motion the hook reported
@@ -1565,6 +1568,9 @@ class HidGestureListener:
             # button held-state tracking stays in sync during command exchanges.
             self._on_report(raw)
         self._consecutive_request_timeouts += 1
+        # Its reply may still arrive; _note_external_write must not take
+        # that late acknowledgement for another client's write.
+        self._timed_out_writes[(feat, func)] = time.monotonic()
         print(f"[HidGesture] request timeout feat=0x{feat:02X} func=0x{func:X} "
               f"devIdx=0x{self._dev_idx:02X} params=[{_hex_bytes(req_params)}] "
               f"(consecutive={self._consecutive_request_timeouts})")
@@ -2220,7 +2226,8 @@ class HidGestureListener:
             self._verify_requested = True
             return
         # A precision-drag shift is deliberately not the saved DPI; unshift
-        # arms its own follow-up verify.
+        # arms its own follow-up verify (which still sees a pending external
+        # write, the flag is only cleared once the restore is queued).
         if self._dpi_shift_active is not None:
             return
         expected = self._dpi_reapply_on_wake
@@ -2229,7 +2236,18 @@ class HidGestureListener:
         if expected is None:
             return
         now = time.monotonic()
-        if now - self._last_verify_time < 5.0:
+        # A foreign write is a concrete event, not a routine poll: restore
+        # right away and even when the DPI read back still matches (the
+        # button diverts or Smart Shift may be what changed).
+        force = self._external_write_seen
+        if force:
+            self._external_write_retries += 1
+            if self._external_write_retries > 3:
+                # Three forced attempts failed to get a read-back; stop
+                # bypassing the throttle and let the routine checks carry on.
+                self._external_write_seen = False
+                force = False
+        if not force and now - self._last_verify_time < 5.0:
             # Too soon after the last read-back: defer rather than drop, so a
             # verify asked for right after a resume (which may have timed out
             # on a still-dozing mouse) is not lost once the mouse is awake.
@@ -2239,11 +2257,15 @@ class HidGestureListener:
         gen = self._dpi_req_gen
         resp = self._request(self._dpi_idx, 2, [0x00])
         if not resp:
+            if force:
+                self._verify_requested = True   # retry on the next pass
             return
         # A DPI write queued while the read was in flight carries the newer
         # wanted value; it is applied right after this and must not be
         # overwritten by a restore of the older one.
         if gen != self._dpi_req_gen or self._pending_dpi is not None:
+            if force:
+                self._verify_requested = True
             return
         _, _, _, _, p = resp
         current = (p[1] << 8 | p[2]) if len(p) >= 3 else None
@@ -2253,14 +2275,20 @@ class HidGestureListener:
         # value; restoring now would undo it mid-drag.
         if self._dpi_shift_active is not None:
             return
-        if current == expected:
+        self._external_write_seen = False
+        self._external_write_retries = 0
+        if current == expected and not force:
             # The device already holds the newest wanted value; a failed
             # earlier write no longer needs replaying.
             self._dpi_reapply_on_wake = None
             self._last_dpi_set = expected
             return
-        print(f"[HidGesture] Device reports DPI {current}, expected {expected} "
-              "-- mouse was power-cycled; restoring settings")
+        if current == expected:
+            print(f"[HidGesture] DPI still {current}; re-applying diverts and "
+                  "Smart Shift after the external write")
+        else:
+            print(f"[HidGesture] Device reports DPI {current}, expected {expected} "
+                  "-- mouse was power-cycled; restoring settings")
         self._pending_dpi = expected
         if self._last_smart_shift_req is not None:
             with self._smart_shift_slot_lock:
@@ -3035,6 +3063,44 @@ class HidGestureListener:
                     except Exception:
                         pass
 
+    def _note_external_write(self, feat, func, sw, params):
+        """Spot a reply to a settings write this process did not send.
+
+        The receiver's vendor interface is shared with other HID++ clients
+        and the device answers every one of them on the same pipe. Our own
+        request replies never get here (``_request`` consumes them) and our
+        fire-and-forget precision writes carry ``SHIFT_SW``, so a DPI write,
+        a setCidReporting or a Smart Shift write reply seen here is foreign.
+        Seen 2026-10-19: another utility re-pointed the gesture buttons and
+        wrote DPI 1000 each time the mouse woke from its own sleep. Ask for
+        an immediate restore instead of waiting for the next timed check."""
+        if sw == SHIFT_SW:
+            return False
+        smart_shift_write_func = 2 if self._smart_shift_enhanced else 1
+        if feat == self._dpi_idx and self._dpi_idx is not None and func == 3:
+            dpi = (params[1] << 8 | params[2]) if len(params) >= 3 else None
+            what = f"DPI -> {dpi}"
+        elif feat == self._feat_idx and self._feat_idx is not None and func == 3:
+            cid = (params[0] << 8 | params[1]) if len(params) >= 2 else None
+            what = f"button reporting 0x{cid:04X}" if cid is not None else "button reporting"
+        elif (feat == self._smart_shift_idx and self._smart_shift_idx is not None
+                and func == smart_shift_write_func):
+            what = "Smart Shift"
+        else:
+            return False
+        # A late acknowledgement of our own write that already timed out
+        # looks the same; nothing changed behind our back then.
+        timed_out_at = self._timed_out_writes.pop((feat, func), None)
+        if timed_out_at is not None and time.monotonic() - timed_out_at < 10.0:
+            return True
+        print(f"[HidGesture] External HID++ write seen ({what}, software-id "
+              f"0x{sw:X}); restoring settings")
+        if not self._external_write_seen:
+            self._external_write_retries = 0
+        self._external_write_seen = True
+        self._verify_requested = True
+        return True
+
     def _on_report(self, raw):
         """Inspect an incoming HID++ report for diverted button / raw XY events."""
         msg = _parse(raw)
@@ -3053,6 +3119,9 @@ class HidGestureListener:
             # A device announces itself with a battery broadcast when its link
             # comes up -- including after a power-off/on that reset its settings.
             self._verify_requested = True
+            return
+
+        if self._note_external_write(feat, func, _sw, params):
             return
 
         if feat != self._feat_idx:

@@ -1880,6 +1880,105 @@ class MacOpenAttemptOrderTests(unittest.TestCase):
         self.assertEqual(backends, ["iokit-ble", "hidapi"])
 
 
+class ExternalWriteTests(unittest.TestCase):
+    """Replies to settings writes from another HID++ client on the shared
+    receiver interface trigger an immediate restore."""
+
+    def _listener(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._dpi_idx = 0x0D
+        listener._feat_idx = 0x09
+        listener._smart_shift_idx = 0x0E
+        listener._dev = object()
+        listener._last_dpi_set = 3200
+        return listener
+
+    def test_foreign_dpi_write_requests_restore(self):
+        listener = self._listener()
+        # setSensorDpi reply from software-id 0x0A: [0x11, dev, feat, func<<4|sw, sensor, hi, lo]
+        listener._on_report(bytes([0x11, 0x01, 0x0D, 0x3A, 0x00, 0x03, 0xE8] + [0] * 13))
+        self.assertTrue(listener._verify_requested)
+        self.assertTrue(listener._external_write_seen)
+
+    def test_own_precision_write_reply_is_ignored(self):
+        listener = self._listener()
+        listener._on_report(bytes([0x11, 0x01, 0x0D, 0x30 | hid_gesture.SHIFT_SW, 0x00, 0x03, 0xE8] + [0] * 13))
+        self.assertFalse(listener._verify_requested)
+
+    def test_foreign_button_reporting_and_smart_shift_writes_request_restore(self):
+        listener = self._listener()
+        listener._on_report(bytes([0x11, 0x01, 0x09, 0x35, 0x00, 0xC3, 0x03, 0x00, 0x52] + [0] * 11))
+        self.assertTrue(listener._verify_requested)
+        listener = self._listener()
+        listener._on_report(bytes([0x11, 0x01, 0x0E, 0x15, 0x02, 0x10, 0x0A] + [0] * 13))
+        self.assertTrue(listener._verify_requested)
+
+    def test_dpi_read_reply_is_not_a_write(self):
+        listener = self._listener()
+        listener._on_report(bytes([0x11, 0x01, 0x0D, 0x25, 0x00, 0x0C, 0x80] + [0] * 13))
+        self.assertFalse(listener._verify_requested)
+
+    def test_forced_verify_bypasses_rate_limit_and_restores_even_when_dpi_matches(self):
+        listener = self._listener()
+        listener._last_smart_shift_req = ("ratchet", True, 16, 10)
+        listener._external_write_seen = True
+        listener._last_verify_time = 10 ** 9   # a verify "just ran"
+        with patch.object(hid_gesture.time, "monotonic", return_value=10 ** 9 + 1), \
+             patch.object(listener, "_request", return_value=(0x11, 0x01, 0x0D, 0x2A, [0x00, 0x0C, 0x80])), \
+             patch.object(listener, "_divert") as divert, \
+             patch.object(listener, "_divert_extras") as extras:
+            listener._verify_device_state()
+        divert.assert_called_once()
+        extras.assert_called_once()
+        self.assertEqual(listener._pending_dpi, 3200)
+        self.assertFalse(listener._external_write_seen)
+
+    def test_late_ack_of_own_timed_out_write_is_not_foreign(self):
+        listener = self._listener()
+        listener._timed_out_writes[(0x0D, 3)] = 10 ** 6
+        with patch.object(hid_gesture.time, "monotonic", return_value=10 ** 6 + 2):
+            listener._on_report(bytes([0x11, 0x01, 0x0D, 0x3A, 0x00, 0x0C, 0x80] + [0] * 13))
+        self.assertFalse(listener._verify_requested)
+        self.assertNotIn((0x0D, 3), listener._timed_out_writes)
+
+    def test_smart_shift_write_func_follows_feature_version(self):
+        listener = self._listener()
+        listener._smart_shift_enhanced = True
+        listener._on_report(bytes([0x11, 0x01, 0x0E, 0x15, 0x02, 0x10, 0x0A] + [0] * 13))
+        self.assertFalse(listener._verify_requested)   # func 1 is a read there
+        listener._on_report(bytes([0x11, 0x01, 0x0E, 0x25, 0x02, 0x10, 0x0A] + [0] * 13))
+        self.assertTrue(listener._verify_requested)
+
+    def test_forced_restore_survives_a_failed_read_back(self):
+        listener = self._listener()
+        listener._external_write_seen = True
+        with patch.object(listener, "_request", return_value=None):
+            listener._verify_device_state()
+        self.assertTrue(listener._external_write_seen)
+        self.assertTrue(listener._verify_requested)
+
+    def test_forced_restore_gives_up_after_three_failed_attempts(self):
+        listener = self._listener()
+        listener._external_write_seen = True
+        listener._last_verify_time = 10 ** 9
+        with patch.object(hid_gesture.time, "monotonic", return_value=10 ** 9 + 1), \
+             patch.object(listener, "_request", return_value=None) as req:
+            for _ in range(4):
+                listener._verify_requested = False
+                listener._verify_device_state()
+        self.assertEqual(req.call_count, 3)
+        self.assertFalse(listener._external_write_seen)
+
+    def test_routine_verify_still_rate_limited(self):
+        listener = self._listener()
+        listener._last_verify_time = 10 ** 9
+        with patch.object(hid_gesture.time, "monotonic", return_value=10 ** 9 + 1), \
+             patch.object(listener, "_request") as req:
+            listener._verify_device_state()
+        req.assert_not_called()
+        self.assertTrue(listener._verify_requested)
+
+
 class PostConnectVerifyTests(unittest.TestCase):
     """After every connect the listener re-checks the device state a couple of
     times, because a DPI write acknowledged right after reconnect can still be
