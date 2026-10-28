@@ -1880,6 +1880,39 @@ class MacOpenAttemptOrderTests(unittest.TestCase):
         self.assertEqual(backends, ["iokit-ble", "hidapi"])
 
 
+class SharedInterfaceErrorReplyTests(unittest.TestCase):
+    """HID++ error reports name the failing request; one addressed to
+    another client (or another request of ours) must not abort the request
+    we are waiting on."""
+
+    def _listener(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._dev = object()
+        listener._dev_idx = 0x01
+        return listener
+
+    def test_foreign_error_is_ignored_and_our_reply_still_accepted(self):
+        listener = self._listener()
+        # error for feat 0x03 func 1 from software-id 0xA, then our real reply
+        foreign_err = bytes([0x11, 0x01, 0xFF, 0x03, 0x1A, 0x02] + [0] * 14)
+        ours = bytes([0x11, 0x01, 0x0D, 0x20 | hid_gesture.MY_SW, 0x00, 0x0C, 0x80] + [0] * 13)
+        replies = [foreign_err, ours]
+        with patch.object(listener, "_tx"), \
+             patch.object(listener, "_rx", side_effect=lambda *_a, **_k: replies.pop(0) if replies else None):
+            resp = listener._request(0x0D, 2, [0x00], timeout_ms=500)
+        self.assertIsNotNone(resp)
+        self.assertEqual(resp[4][1:3], [0x0C, 0x80] if isinstance(resp[4], list) else bytes([0x0C, 0x80]))
+
+    def test_our_own_error_still_fails_the_request(self):
+        listener = self._listener()
+        our_err = bytes([0x11, 0x01, 0xFF, 0x0D, 0x20 | hid_gesture.MY_SW, 0x02] + [0] * 14)
+        replies = [our_err]
+        with patch.object(listener, "_tx"), \
+             patch.object(listener, "_rx", side_effect=lambda *_a, **_k: replies.pop(0) if replies else None):
+            resp = listener._request(0x0D, 2, [0x00], timeout_ms=300)
+        self.assertIsNone(resp)
+
+
 class ExternalWriteTests(unittest.TestCase):
     """Replies to settings writes from another HID++ client on the shared
     receiver interface trigger an immediate restore."""
@@ -1932,12 +1965,13 @@ class ExternalWriteTests(unittest.TestCase):
 
     def test_reply_to_our_own_recent_request_is_not_foreign(self):
         listener = self._listener()
+        own = 0x30 | hid_gesture.MY_SW
         listener._recent_own_tx[(0x0D, 3)] = (10 ** 6, (0x00, 0x0C, 0x80))
         with patch.object(hid_gesture.time, "monotonic", return_value=10 ** 6 + 4):
-            listener._on_report(bytes([0x11, 0x01, 0x0D, 0x3A, 0x00, 0x0C, 0x80] + [0] * 13))
+            listener._on_report(bytes([0x11, 0x01, 0x0D, own, 0x00, 0x0C, 0x80] + [0] * 13))
         self.assertFalse(listener._verify_requested)
         with patch.object(hid_gesture.time, "monotonic", return_value=10 ** 6 + 30):
-            listener._on_report(bytes([0x11, 0x01, 0x0D, 0x3A, 0x00, 0x0C, 0x80] + [0] * 13))
+            listener._on_report(bytes([0x11, 0x01, 0x0D, own, 0x00, 0x0C, 0x80] + [0] * 13))
         self.assertTrue(listener._verify_requested)
 
     def test_different_value_inside_own_window_is_foreign(self):

@@ -942,7 +942,13 @@ _DIVERT_RAW_XY      = 0x33  # 0x01 | 0x02 | 0x10 | 0x20 -- divert + rawXY
 _UNDIVERT_BUTTON    = 0x02  # 0x02 only         -- revert button-only divert
 _UNDIVERT_RAW_XY    = 0x22  # 0x02 | 0x20       -- revert rawXY divert
 
-MY_SW          = 0x0A        # arbitrary software-id used in our requests
+# Software-id carried in our requests; the device echoes it in the reply so
+# each client can pick out its own answers. 0x0A was the original choice, but
+# SteerMouse Manager uses 0x0A as well, and on macOS the receiver interface is
+# shared with it: when both probe the mouse at the same moment (display wake,
+# KVM return) each sees the other's replies as its own and the name lookup
+# can come back garbled. 0x0D is unused by the tools seen so far.
+MY_SW          = 0x0D
 SHIFT_SW       = 0x0B        # software-id of fire-and-forget precision-drag DPI writes
 
 HIDPP_ERROR_NAMES = {
@@ -1548,14 +1554,24 @@ class HidGestureListener:
                 self._stray_reply = (r_dev, feat, func, list(r_params))
                 continue
 
-            # HID++ error (feature-index 0xFF)
+            # HID++ error (feature-index 0xFF). The report names the failing
+            # request: its feature index sits where func/sw normally are,
+            # params[0] = funcId<<4 | swId, params[1] = error code.
             if r_feat == 0xFF:
-                # params[0] = funcId<<4 | swId of the failing request. An
-                # error for a precision-drag write (its own software-id) is
-                # not an answer to this request.
-                if r_params and (r_params[0] & 0x0F) == SHIFT_SW:
+                failing_feat = (r_func << 4) | r_sw
+                failing_sw = r_params[0] & 0x0F if r_params else None
+                failing_func = r_params[0] >> 4 if r_params else None
+                # An error for a precision-drag write (its own software-id)
+                # is not an answer to this request.
+                if failing_sw == SHIFT_SW:
                     print(f"[HidGesture] precision DPI write rejected: "
                           f"err=0x{(r_params[1] if len(r_params) > 1 else 0):02X}")
+                    continue
+                # Nor is an error addressed to another client's request or
+                # to a different request of ours: the receiver interface is
+                # shared, so their errors arrive here too.
+                if (failing_sw != MY_SW or failing_feat != feat
+                        or failing_func != func):
                     continue
                 code = r_params[1] if len(r_params) > 1 else 0
                 code_name = HIDPP_ERROR_NAMES.get(code, "UNKNOWN")
