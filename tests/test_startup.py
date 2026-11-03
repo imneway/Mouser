@@ -388,6 +388,68 @@ class ApplyLoginStartupMacTests(unittest.TestCase):
         )
 
 
+    def _same_plist(self, tmp):
+        import plistlib
+        plist = os.path.join(tmp, "io.github.tombadash.mouser.plist")
+        with open(plist, "wb") as f:
+            f.write(plistlib.dumps({
+                "Label": st.MACOS_LAUNCH_AGENT_LABEL,
+                "ProgramArguments": ["/X/Mouser"],
+                "RunAtLoad": True,
+            }, fmt=plistlib.FMT_XML))
+        return plist
+
+    def _mac_patches(self, plist):
+        return (
+            patch.object(sys, "platform", "darwin"),
+            patch("core.startup.os.getuid", return_value=501, create=True),
+            patch.object(st, "supports_login_startup", return_value=True),
+            patch.object(st, "_macos_plist_path", return_value=plist),
+            patch.object(st, "_program_arguments", return_value=["/X/Mouser"]),
+        )
+
+    def test_macos_enable_unchanged_and_loaded_does_not_bootout(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plist = self._same_plist(tmp)
+            a, b, c, d, e = self._mac_patches(plist)
+            with a, b, c, d, e, patch.object(st, "_launchctl_run") as m_lc:
+                m_lc.return_value = MagicMock(returncode=0)
+                st.apply_login_startup(True)
+            self.assertEqual(
+                [call.args[0] for call in m_lc.call_args_list],
+                [["launchctl", "print", "gui/501/" + st.MACOS_LAUNCH_AGENT_LABEL]],
+            )
+
+    def test_macos_enable_unchanged_but_unloaded_bootstraps_only(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plist = self._same_plist(tmp)
+            a, b, c, d, e = self._mac_patches(plist)
+            with a, b, c, d, e, patch.object(st, "_launchctl_run") as m_lc:
+                m_lc.side_effect = [MagicMock(returncode=113), MagicMock(returncode=0)]
+                st.apply_login_startup(True)
+            self.assertEqual(
+                [call.args[0] for call in m_lc.call_args_list],
+                [
+                    ["launchctl", "print", "gui/501/" + st.MACOS_LAUNCH_AGENT_LABEL],
+                    ["launchctl", "bootstrap", "gui/501", plist],
+                ],
+            )
+
+
+    def test_macos_enable_changed_under_own_agent_writes_without_launchctl(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            plist = os.path.join(tmp, "io.github.tombadash.mouser.plist")
+            with open(plist, "wb") as f:
+                f.write(b"old plist")
+            a, b, c, d, e = self._mac_patches(plist)
+            env = patch.dict(os.environ, {"XPC_SERVICE_NAME": st.MACOS_LAUNCH_AGENT_LABEL})
+            with a, b, c, d, e, env, patch.object(st, "_launchctl_run") as m_lc:
+                st.apply_login_startup(True)
+            m_lc.assert_not_called()
+            with open(plist, "rb") as f:
+                self.assertIn(b"/X/Mouser", f.read())
+
+
 class SyncFromConfigTests(unittest.TestCase):
     def test_delegates_to_apply(self):
         with patch.object(st, "apply_login_startup") as mock_apply:

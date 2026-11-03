@@ -439,6 +439,12 @@ def _apply_macos(enabled: bool) -> None:
         os.makedirs(launch_agents_dir, exist_ok=True)
         plist_existed = os.path.isfile(plist_path)
         previous_plist = None
+        payload = {
+            "Label": MACOS_LAUNCH_AGENT_LABEL,
+            "ProgramArguments": _program_arguments(),
+            "RunAtLoad": True,
+        }
+        new_plist = plistlib.dumps(payload, fmt=plistlib.FMT_XML)
         if plist_existed:
             try:
                 with open(plist_path, "rb") as f:
@@ -447,13 +453,27 @@ def _apply_macos(enabled: bool) -> None:
                 raise RuntimeError(
                     f"failed to preserve existing launch agent: {exc}"
                 ) from exc
+            if previous_plist == new_plist:
+                # Nothing to change. Never boot out here: when launchd started
+                # this process at login, bootout would kill the app itself.
+                loaded = _launchctl_run(
+                    ["launchctl", "print", f"{domain}/{MACOS_LAUNCH_AGENT_LABEL}"]
+                )
+                if loaded.returncode != 0:
+                    result = _launchctl_run(
+                        ["launchctl", "bootstrap", domain, plist_path]
+                    )
+                    if result.returncode != 0:
+                        raise RuntimeError(
+                            _launchctl_failure_message("bootstrap", result)
+                        )
+                return
+            if os.environ.get("XPC_SERVICE_NAME") == MACOS_LAUNCH_AGENT_LABEL:
+                # launchd started us from this agent; booting it out would
+                # kill this process. Update the file only; next login uses it.
+                _atomic_write_file(plist_path, new_plist)
+                return
             _launchctl_run(["launchctl", "bootout", domain, plist_path])
-        payload = {
-            "Label": MACOS_LAUNCH_AGENT_LABEL,
-            "ProgramArguments": _program_arguments(),
-            "RunAtLoad": True,
-        }
-        new_plist = plistlib.dumps(payload, fmt=plistlib.FMT_XML)
         try:
             _atomic_write_file(plist_path, new_plist)
             result = _launchctl_run(["launchctl", "bootstrap", domain, plist_path])
