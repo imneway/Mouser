@@ -533,6 +533,8 @@ class BackendSmartShiftTests(unittest.TestCase):
         with (
             patch("ui.backend.load_config", return_value=cfg),
             patch("ui.backend.save_config"),
+            # Don't touch the real login item on the test machine.
+            patch("ui.backend.sync_login_startup_from_config"),
         ):
             return Backend(engine=None)
 
