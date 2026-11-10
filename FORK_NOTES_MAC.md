@@ -137,3 +137,12 @@ PC 端相关资料：PC 安装在 `C:\Program Files\Utilities\Mouser`（计划�
 - 2026-10-28 SteerMouse 再次认不出型号（屏幕唤醒 09:18，接收器没拔插）：ioreg 显示 0xFF00 接口是共享的（SteerMouse Manager / Mos / Mouser 都开着），不是独占问题。SteerMouse 的 Device.smsetting 在 09:23 改写（新登记了一个 "USB Receiver"），而 09:18:36–38 正是 Mouser 重新探测鼠标的时刻；两家的 HID++ software-id 都是 0x0A，回包互相串。Mouser 改用 0x0D（`MY_SW`），并且错误回包只在 feature/func/sw 都对得上自己当前请求时才算数（以前别人的错误回包会让 Mouser 放弃自己在等的请求）。SteerMouse 那边要重新认出来得靠它自己重新登记（用户拔插接收器或点 Device 页的 Reconfigure），Mouser 不碰它。
 
 - 2026-11-03：Mac 开机后 Mouser 不在。系统日志显示它启动时同步开机自启项，执行 `launchctl bootout` 卸掉了拉起自己的服务（`caller = launchctl<-Mouser`），进程当场被杀。上游在 c999e53 前后就是“先 bootout 再 bootstrap”。修复：plist 内容不变就不 bootout，没加载才 bootstrap；内容有变但当前进程由该服务拉起（`XPC_SERVICE_NAME` 等于 label）时只写文件、不碰 launchctl。
+- 2026-11-10 SteerMouse 认不出型号复发（11-08、11-10，累计第 4 次），原因未定，先观察，Mouser 未改：
+  - 现象不变：从 PC 切回或屏幕唤醒后，SteerMouse 把 MX Master 3S 登记成 "USB Receiver"，要在它的 Device 页点 Reconfigure 或拔插接收器才恢复，重启 SteerMouse 没用。
+  - 10-14（hidapi 独占）和 10-28（software-id 都是 0x0A）两个已知原因都已修，这两次不是它们。11-10 那次的 Mouser 日志被 Mole 的“应用日志”清理删掉了，没有直接证据。
+  - 线索：11-10 15:42:36 接收器接回，Mouser 日志是 `No slot answered the broadcast probe; re-probing cached devIdx=0x01 only`，即鼠标连 Mouser 的第一次询问都没应答，Mouser 靠缓存的槽位重试才连上。SteerMouse 看起来只问一次、不重试。这次 SteerMouse 是认出来了的（15:42:39 有 software-id 0xA 的外部写入），所以“同时探测”不是必然失败。
+  - 两个假设：(a) 纯时序，接收器刚接回时鼠标还没醒，SteerMouse 单独运行也会认错；(b) Mouser 连上时约 2 s 的密集 HID++ 请求（特性发现 + 8 个控件枚举）挤掉或拖慢了 SteerMouse 的询问。
+  - 候选修复（未做）：接收器接回 / 唤醒后 Mouser 延迟几秒再探测，让 SteerMouse 先认完；代价是切回后 DPI 和手势晚几秒生效。只对 (b) 有效。
+  - 区分办法：退出 Mouser 正常切换用两三天，仍复发就是 (a)，Mouser 这边不用改。下次复发先记下时间，对照 `~/Library/Logs/Mouser/mouser.log` 里 `Logitech device connected` 前后几秒，以及 `~/Library/Application Support/SteerMouse & CursorSense/Device.smsetting` 的改写时间。
+  - 用户决定保留 SteerMouse：滚动加速（Wheel 页 Acceleration 1.5，和 Mos 叠加调好的手感）、按键映射（含按应用配置）、关闭指针加速，这些 Mouser 接替不了。
+  - 注意 Mole 的 `mo clean` 会删 `~/Library/Logs/Mouser/mouser.log`，Mouser 会继续写已删除的文件，清理后要重启 Mouser。
