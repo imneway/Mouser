@@ -267,6 +267,30 @@ class MacOSWakeRecoveryTests(unittest.TestCase):
 
         self.assertEqual(len(workers), 2)
 
+    def test_resume_holds_probe_at_once_and_reconnects_after_hold(self):
+        self.hook._running = True
+        self.hook._device_connected = True
+        self.hook._last_resume_at = -1e9
+        with patch.object(self.module.threading, "Thread") as thread, patch("builtins.print"):
+            self.assertTrue(self.hook._start_resume_recovery("screens wake"))
+        self.listener.hold_probe.assert_called_once_with(self.hook._PROBE_HOLD_S)
+        thread.return_value.start.assert_called_once_with()
+        self.listener.force_reconnect.assert_not_called()
+        # the reconnect (and its undivert writes) waits until the hold is over
+        self.assertGreaterEqual(self.hook._RESUME_RECONNECT_DELAY_S, self.hook._PROBE_HOLD_S)
+
+    def test_resume_worker_waits_for_an_extended_hold(self):
+        self.hook._running = True
+        self.hook._device_connected = True
+        self.listener.probe_hold_remaining.side_effect = [1.2, 0.3, 0.0]
+        with patch.object(self.module.time, "sleep") as sleep:
+            self.hook._resume_recovery_worker()
+        self.assertEqual(
+            [c.args[0] for c in sleep.call_args_list],
+            [self.hook._RESUME_RECONNECT_DELAY_S, 0.5, 0.3],
+        )
+        self.listener.force_reconnect.assert_called_once_with()
+
     def test_resume_worker_does_not_reconnect_after_stop(self):
         self.hook._running = False
 

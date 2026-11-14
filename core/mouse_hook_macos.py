@@ -573,7 +573,15 @@ class MouseHook(BaseMouseHook):
     # pre-sleep handle once. HidGestureListener owns all subsequent retries;
     # queueing more force requests while it reconnects would tear down each
     # fresh connection as soon as it opens.
-    _RESUME_RECONNECT_DELAY_S = 0.5
+    # How long to stay off the receiver after it (re)appears or the Mac wakes,
+    # so SteerMouse can identify the mouse first (see HidGestureListener.hold_probe).
+    # SteerMouse is done within ~3-4 s of the receiver arriving (its own DPI
+    # write lands then), so this trades ~4 s of default DPI for a correct
+    # SteerMouse device match.
+    _PROBE_HOLD_S = 4.0
+    # The resume reconnect waits out that hold too: tearing the old handle
+    # down sends undivert writes, which would land in SteerMouse's window.
+    _RESUME_RECONNECT_DELAY_S = _PROBE_HOLD_S
     _RESUME_DEDUPE_S = 5.0
 
     def _start_resume_recovery(self, reason):
@@ -584,6 +592,11 @@ class MouseHook(BaseMouseHook):
             return False
         self._last_resume_at = now
         print(f"[MouseHook] Resume detected ({reason}) — recovering")
+        hg = self._hid_gesture
+        if hg is not None and hasattr(hg, "hold_probe"):
+            # Hold right away, not after the reconnect delay: the listener
+            # may otherwise probe or send queued requests in between.
+            hg.hold_probe(self._PROBE_HOLD_S)
         threading.Thread(
             target=self._resume_recovery_worker,
             daemon=True,
@@ -597,6 +610,16 @@ class MouseHook(BaseMouseHook):
             return
         hg = self._hid_gesture
         if hg is None:
+            return
+        # A receiver arrival during the wait extends the hold; tear down only
+        # once it's really over (bounded, in case arrivals keep coming).
+        remaining = getattr(hg, "probe_hold_remaining", None)
+        for _ in range(100):
+            left = remaining() if callable(remaining) else 0
+            if not isinstance(left, (int, float)) or left <= 0 or not self._running:
+                break
+            time.sleep(min(0.5, left))
+        if not self._running:
             return
         try:
             hg.force_reconnect()
@@ -624,6 +647,8 @@ class MouseHook(BaseMouseHook):
         hg = getattr(self, "_hid_gesture", None)
         if hg is not None and hasattr(hg, "notify_device_change"):
             try:
+                if arrived and hasattr(hg, "hold_probe"):
+                    hg.hold_probe(self._PROBE_HOLD_S)
                 hg.notify_device_change()
             except Exception:
                 pass

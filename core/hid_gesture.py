@@ -1158,6 +1158,7 @@ class HidGestureListener:
         self._stray_reply = None   # late reply from another receiver slot, see _request
         self._wake_event = threading.Event()   # set by notify_device_change()/notify_user_input()
         self._last_input_wake = 0.0            # monotonic time of the last input-triggered wake
+        self._probe_hold_until = 0.0           # no connect probe before this monotonic time, see hold_probe
         self._dpi_reapply_on_wake = None       # DPI whose write failed while the mouse dozed
         self._last_dpi_set = None              # last DPI the device acknowledged
         self._last_smart_shift_req = None      # last Smart Shift tuple the device acknowledged
@@ -2124,6 +2125,8 @@ class HidGestureListener:
     def _write_dpi_now(self, dpi):
         if self._dpi_idx is None or self._dev is None:
             return False
+        if self._probe_held():
+            return False   # stay off the receiver while SteerMouse identifies the mouse
         dpi = int(dpi)
         try:
             # Own software-id: the reply (func 3, or an error) must never be
@@ -3285,6 +3288,8 @@ class HidGestureListener:
         back to the default direct-then-receiver scan with the same
         per-slot timeout. On divert success the working tuple is
         persisted so the next launch hits the warm path."""
+        if self._probe_held():
+            return False   # a hold began after the loop checked; the loop waits it out
         infos = self._vendor_hid_infos()
         if not infos:
             return False
@@ -3797,6 +3802,41 @@ class HidGestureListener:
                 return
             time.sleep(0.1)
 
+    def hold_probe(self, seconds):
+        """Keep the reconnect loop from probing for ``seconds`` from now.
+
+        On macOS the receiver's vendor interface is shared with SteerMouse
+        Manager, which asks the mouse for its name the moment the receiver
+        shows up and does not retry. Mouser's own probe burst at that moment
+        mixes up the replies, and SteerMouse then registers the mouse as a
+        generic "USB Receiver". Holding back lets it finish first; DPI and
+        diverts are applied a few seconds later instead. Never shortens an
+        existing hold, so a burst of per-interface notifications is harmless."""
+        until = time.monotonic() + max(0.0, float(seconds))
+        if until > self._probe_hold_until:
+            self._probe_hold_until = until
+
+    def _probe_held(self):
+        return time.monotonic() < self._probe_hold_until
+
+    def probe_hold_remaining(self):
+        """Seconds left in the current hold_probe() window (0 when none)."""
+        return max(0.0, self._probe_hold_until - time.monotonic())
+
+    def _wait_probe_hold(self):
+        """Block until any hold_probe() window has passed (or the listener
+        stops). Device-change and pointer wakes don't cut it short -- that's
+        the point -- and the ones that arrived meanwhile are moot afterwards."""
+        held = False
+        while self._running:
+            remaining = self._probe_hold_until - time.monotonic()
+            if remaining <= 0:
+                break
+            held = True
+            time.sleep(min(0.1, remaining))
+        if held:
+            self._wake_event.clear()
+
     def notify_device_change(self):
         """Called by the mouse hook on an OS device-change notification.
         Cuts the reconnect backoff short so the next probe runs immediately."""
@@ -3840,7 +3880,12 @@ class HidGestureListener:
         _CONNECT_BACKOFF_MAX_S = 30.0
         connect_backoff_s = _CONNECT_BACKOFF_BASE_S
         while self._running:
+            self._wait_probe_hold()
+            if not self._running:
+                break
             if not self._try_connect():
+                if self._probe_held():
+                    continue   # wait out the hold at the loop top, not the backoff
                 if not retry_logged:
                     print(
                         "[HidGesture] No compatible device; retrying with "
@@ -3925,6 +3970,15 @@ class HidGestureListener:
                                 self._pending_dpi = self._dpi_reapply_on_wake
                             else:
                                 self._verify_requested = True
+                        continue
+
+                    if self._probe_held():
+                        # Don't talk to the mouse while SteerMouse identifies it
+                        # (see hold_probe): just keep reading; queued requests,
+                        # verifies and follow-ups run once the hold is over.
+                        raw = self._rx(100)
+                        if raw:
+                            self._on_report(raw)
                         continue
 
                     if self._pop_due_followup_verify():

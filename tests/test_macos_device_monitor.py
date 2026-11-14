@@ -42,6 +42,16 @@ class MacOSHookDeviceChangeTests(unittest.TestCase):
             self.hook._on_logitech_device_change(True)
         self.listener.notify_device_change.assert_called_once_with()
 
+    def test_device_arrival_holds_probe_for_steermouse(self):
+        with patch("builtins.print"):
+            self.hook._on_logitech_device_change(True)
+        self.listener.hold_probe.assert_called_once_with(self.hook._PROBE_HOLD_S)
+
+    def test_device_removal_does_not_hold_probe(self):
+        with patch("builtins.print"):
+            self.hook._on_logitech_device_change(False)
+        self.listener.hold_probe.assert_not_called()
+
     def test_device_removal_also_notifies_listener(self):
         with patch("builtins.print"):
             self.hook._on_logitech_device_change(False)

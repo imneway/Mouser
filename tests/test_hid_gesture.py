@@ -1823,6 +1823,72 @@ class HidReconnectStormTests(unittest.TestCase):
         # the wake flag is consumed so the next backoff sleep is a real one
         self.assertFalse(listener._wake_event.is_set())
 
+    def test_probe_hold_blocks_until_it_expires_despite_wakes(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._running = True
+        listener.hold_probe(0.4)
+        # device-change / pointer wakes during the hold must not cut it short
+        threading.Timer(0.1, listener.notify_device_change).start()
+        start = time.monotonic()
+        listener._wait_probe_hold()
+        self.assertGreaterEqual(time.monotonic() - start, 0.35)
+        # wakes that arrived during the hold are consumed
+        self.assertFalse(listener._wake_event.is_set())
+
+    def test_probe_hold_never_shortens_and_ends_on_stop(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._running = True
+        listener.hold_probe(5)
+        until = listener._probe_hold_until
+        listener.hold_probe(0.1)
+        self.assertEqual(listener._probe_hold_until, until)
+        threading.Timer(0.2, lambda: setattr(listener, "_running", False)).start()
+        start = time.monotonic()
+        listener._wait_probe_hold()
+        self.assertLess(time.monotonic() - start, 1.0)
+
+    def test_no_hold_means_no_wait_and_wake_flag_kept(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._running = True
+        listener.notify_device_change()
+        start = time.monotonic()
+        listener._wait_probe_hold()
+        self.assertLess(time.monotonic() - start, 0.05)
+        self.assertTrue(listener._wake_event.is_set())
+
+    def test_main_loop_waits_out_probe_hold_before_connecting(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._running = True
+        listener.hold_probe(0.3)
+        start = time.monotonic()
+        probed_at = []
+
+        def fake_connect():
+            probed_at.append(time.monotonic())
+            listener._running = False
+            return False
+
+        with (
+            patch.object(listener, "_try_connect", side_effect=fake_connect),
+            patch.object(listener, "_interruptible_sleep"),
+            patch("builtins.print"),
+        ):
+            listener._main_loop()
+        self.assertEqual(len(probed_at), 1)
+        self.assertGreaterEqual(probed_at[0] - start, 0.25)
+
+    def test_probe_hold_blocks_immediate_dpi_writes_and_connect(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._running = True
+        listener._dpi_idx = 0x0D
+        listener._dev = Mock()
+        listener.hold_probe(5)
+        self.assertFalse(listener._write_dpi_now(400))
+        listener._dev.write.assert_not_called()
+        with patch.object(listener, "_vendor_hid_infos") as infos:
+            self.assertFalse(listener._try_connect())
+        infos.assert_not_called()
+
     def test_user_input_cuts_backoff_only_while_disconnected(self):
         listener = hid_gesture.HidGestureListener()
         listener._running = True

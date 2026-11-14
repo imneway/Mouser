@@ -146,3 +146,10 @@ PC 端相关资料：PC 安装在 `C:\Program Files\Utilities\Mouser`（计划�
   - 区分办法：退出 Mouser 正常切换用两三天，仍复发就是 (a)，Mouser 这边不用改。下次复发先记下时间，对照 `~/Library/Logs/Mouser/mouser.log` 里 `Logitech device connected` 前后几秒，以及 `~/Library/Application Support/SteerMouse & CursorSense/Device.smsetting` 的改写时间。
   - 用户决定保留 SteerMouse：滚动加速（Wheel 页 Acceleration 1.5，和 Mos 叠加调好的手感）、按键映射（含按应用配置）、关闭指针加速，这些 Mouser 接替不了。
   - 注意 Mole 的 `mo clean` 会删 `~/Library/Logs/Mouser/mouser.log`，Mouser 会继续写已删除的文件，清理后要重启 Mouser。
+- 2026-11-14 让 SteerMouse 先认鼠标（探测挂起，仅 macOS）：11-10 记录的假设 (b) 得到证据。11-14 10:40:39 接收器接回，鼠标没醒，Mouser 在 3 s 内把 6 个接口都试了一遍、发出几十条请求，读回的设备名是乱码 `'P 8 '`（回包串了）；SteerMouse 在 10:52 改写 Device.smsetting，又登记了一个 "USB Receiver"。另外从日志看 SteerMouse 每次在接收器接回后 3–4 s 内完成识别并写入它自己的 DPI 1000（`External HID++ write seen ... software-id 0xA`）。
+  - 做法：`HidGestureListener.hold_probe(s)` 设一个挂起期限。挂起期间：重连循环不探测（`_wait_probe_hold`，设备变化/指针移动唤醒不缩短它；`_try_connect` 开头也查一次，防止期限在循环检查之后才设）；已连接的内层循环不发任何请求（回读、follow-up、排队的 DPI/Smart Shift/滚轮/电量/触感请求都等挂起结束），只读报文；精细拖动的即时写 DPI 直接跳过。
+  - 触发：`mouse_hook_macos` 在接收器接回（`_on_logitech_device_change(True)`）和唤醒（`_start_resume_recovery`，收到通知当下就挂起）时调用 `hold_probe(_PROBE_HOLD_S=4.0)`；唤醒后的强制重连推迟到挂起结束（`_RESUME_RECONNECT_DELAY_S = _PROBE_HOLD_S`），因为拆旧连接时的 undivert 写入也会落在 SteerMouse 的窗口里。接收器拔出不挂起。
+  - 代价：切回 Mac 或唤醒后约 4–5 s 内是鼠标默认 DPI（SteerMouse 写的 1000），之后 Mouser 写回设定值；这段时间里界面上的 DPI/电量操作会等到挂起结束或超时。时长在 `_PROBE_HOLD_S` 调。
+  - 验证：等用户实测几天 SteerMouse 是否还认成 "USB Receiver"。日志上应看到 `Logitech device connected — re-probing` 之后约 4 s 才出现 `Backend preference: auto`，且不再有乱码设备名。Windows 不调用 hold_probe，行为不变。
+  - 唤醒后的重连等挂起真正结束（`probe_hold_remaining()`，期间若接收器接回把挂起延长，也会等）。
+  - Codex 复审指出、未处理的已知缺口（都要在切换/唤醒后 4 s 内恰好发生）：挂起期间按手势键，`_on_report` 回调里的 `_set_cid_reporting` 仍会直接发送，`play_haptic_immediate` 同理；挂起期间从界面改 Smart Shift / 触感 / 力度，请求会在 3 s 后超时被丢弃（设置已保存，下次重连会重新下发）；挂起若在 `_try_connect` 已经开始之后才设，那一轮探测不会中途停下。若实测仍复发，先看是否撞上这几种情况，再考虑在 `_tx` 统一拦截。
