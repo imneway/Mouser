@@ -1889,6 +1889,74 @@ class HidReconnectStormTests(unittest.TestCase):
             self.assertFalse(listener._try_connect())
         infos.assert_not_called()
 
+    def _connected_listener_without_dpi_idx(self):
+        listener = hid_gesture.HidGestureListener()
+        listener._running = True
+        listener._dev = Mock()
+        listener._feat_idx = 0x09      # REPROG_V4 found: the device is connected
+        listener._dpi_idx = None       # ...but the ADJUSTABLE_DPI lookup timed out
+        return listener
+
+    def test_dpi_write_recovers_from_a_lost_feature_lookup(self):
+        listener = self._connected_listener_without_dpi_idx()
+        listener._pending_dpi = 3200
+        sent = []
+
+        def fake_request(feat, func, params, timeout_ms=2000):
+            sent.append((feat, func, list(params)))
+            return (1, feat, func, hid_gesture.MY_SW, [0x00, 0x0C, 0x80])
+
+        with (
+            patch.object(listener, "_find_feature", return_value=0x0D) as find,
+            patch.object(listener, "_request", side_effect=fake_request),
+            patch("builtins.print"),
+        ):
+            listener._apply_pending_dpi()
+        find.assert_called_once_with(hid_gesture.FEAT_ADJ_DPI)
+        self.assertEqual(listener._dpi_idx, 0x0D)
+        self.assertEqual(sent[0][:2], (0x0D, 3))
+        self.assertEqual(sent[0][2][1:3], [0x0C, 0x80])
+
+    def test_dpi_wanted_is_kept_when_the_late_lookup_also_fails(self):
+        listener = self._connected_listener_without_dpi_idx()
+        listener._pending_dpi = 3200
+        with patch.object(listener, "_find_feature", return_value=None), patch("builtins.print"):
+            listener._apply_pending_dpi()
+        self.assertIsNone(listener._pending_dpi)
+        self.assertEqual(listener._dpi_reapply_on_wake, 3200)
+
+        # Not connected at all: nothing to replay on this handle.
+        listener = hid_gesture.HidGestureListener()
+        listener._pending_dpi = 3200
+        with patch("builtins.print"):
+            listener._apply_pending_dpi()
+        self.assertIsNone(listener._dpi_reapply_on_wake)
+
+    def test_late_dpi_lookup_is_rate_limited_and_needs_a_connection(self):
+        listener = self._connected_listener_without_dpi_idx()
+        with patch.object(listener, "_find_feature", return_value=None) as find, patch("builtins.print"):
+            self.assertFalse(listener._ensure_dpi_idx())
+            self.assertFalse(listener._ensure_dpi_idx())   # within the retry window
+        self.assertEqual(find.call_count, 1)
+
+        listener._dpi_lookup_retry_at = 0.0
+        listener._feat_idx = None                           # not connected at all
+        with patch.object(listener, "_find_feature") as find:
+            self.assertFalse(listener._ensure_dpi_idx())
+        find.assert_not_called()
+
+    def test_verify_runs_after_a_late_dpi_lookup(self):
+        listener = self._connected_listener_without_dpi_idx()
+        listener._last_dpi_set = 3200
+        with (
+            patch.object(listener, "_find_feature", return_value=0x0D),
+            patch.object(listener, "_request", return_value=None) as request,
+            patch("builtins.print"),
+        ):
+            listener._verify_device_state()
+        self.assertEqual(listener._dpi_idx, 0x0D)
+        self.assertTrue(request.called)   # the read-back was attempted, not skipped
+
     def test_user_input_cuts_backoff_only_while_disconnected(self):
         listener = hid_gesture.HidGestureListener()
         listener._running = True

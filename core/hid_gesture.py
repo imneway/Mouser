@@ -1159,6 +1159,7 @@ class HidGestureListener:
         self._wake_event = threading.Event()   # set by notify_device_change()/notify_user_input()
         self._last_input_wake = 0.0            # monotonic time of the last input-triggered wake
         self._probe_hold_until = 0.0           # no connect probe before this monotonic time, see hold_probe
+        self._dpi_lookup_retry_at = 0.0        # last late ADJUSTABLE_DPI lookup, see _ensure_dpi_idx
         self._dpi_reapply_on_wake = None       # DPI whose write failed while the mouse dozed
         self._last_dpi_set = None              # last DPI the device acknowledged
         self._last_smart_shift_req = None      # last Smart Shift tuple the device acknowledged
@@ -2049,14 +2050,52 @@ class HidGestureListener:
         self._pending_dpi = None
         self._dpi_event.set()
 
+    _DPI_LOOKUP_RETRY_S = 5.0
+
+    def _ensure_dpi_idx(self):
+        """True when the ADJUSTABLE_DPI feature index is known.
+
+        Discovery asks for it exactly once per connection. If that one
+        request times out (another HID++ client talking at the same moment,
+        or the mouse still waking), the connection used to go on without DPI
+        support at all: every write failed with "not connected" and the
+        verifies were skipped, until the next reconnect. Look it up again
+        when DPI is actually needed, at most once every few seconds."""
+        if self._dpi_idx is not None:
+            return True
+        if self._dev is None or self._feat_idx is None:
+            return False
+        now = time.monotonic()
+        if now - self._dpi_lookup_retry_at < self._DPI_LOOKUP_RETRY_S:
+            return False
+        self._dpi_lookup_retry_at = now
+        try:
+            fi = self._find_feature(FEAT_ADJ_DPI)
+        except Exception as exc:
+            print(f"[HidGesture] late ADJUSTABLE_DPI lookup failed: {exc}")
+            return False
+        if not fi:
+            return False
+        self._dpi_idx = fi
+        print(f"[HidGesture] Found ADJUSTABLE_DPI @0x{fi:02X} (late lookup)")
+        return True
+
     def _apply_pending_dpi(self):
         """Called from the listener thread to actually send DPI."""
         dpi = self._pending_dpi
         if dpi is None:
             return
         gen = self._dpi_req_gen
-        if self._dpi_idx is None or self._dev is None:
-            print("[HidGesture] Cannot set DPI -- not connected")
+        if not self._ensure_dpi_idx() or self._dev is None:
+            print("[HidGesture] Cannot set DPI -- "
+                  + ("not connected" if self._dev is None or self._feat_idx is None
+                     else "ADJUSTABLE_DPI feature not found"))
+            # Connected but the feature lookup hasn't succeeded yet: keep the
+            # wanted value so the post-connect / periodic verifies (which
+            # retry the lookup) write it instead of leaving the default DPI.
+            if (self._dev is not None and self._feat_idx is not None
+                    and gen == self._dpi_req_gen):
+                self._dpi_reapply_on_wake = dpi
             self._finish_dpi_request(gen, False)
             return
         hi = (dpi >> 8) & 0xFF
@@ -2099,7 +2138,7 @@ class HidGestureListener:
     def _apply_pending_read_dpi(self):
         """Called from the listener thread to read current DPI."""
         gen = self._dpi_req_gen
-        if self._dpi_idx is None or self._dev is None:
+        if not self._ensure_dpi_idx() or self._dev is None:
             self._finish_dpi_request(gen, None)
             return
         # getSensorDpi: function 2, params [sensorIdx=0]
@@ -2236,7 +2275,7 @@ class HidGestureListener:
         """Read back DPI; if it no longer matches what we last wrote, the
         device was power-cycled: restore DPI and Smart Shift and re-arm the
         button diverts."""
-        if self._dpi_idx is None or self._dev is None:
+        if not self._ensure_dpi_idx() or self._dev is None:
             return
         # A write that failed while the mouse dozed holds the newest wanted
         # value; never let an older acknowledged one win over it. A write

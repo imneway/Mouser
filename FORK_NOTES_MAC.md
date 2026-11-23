@@ -153,3 +153,8 @@ PC 端相关资料：PC 安装在 `C:\Program Files\Utilities\Mouser`（计划�
   - 验证：等用户实测几天 SteerMouse 是否还认成 "USB Receiver"。日志上应看到 `Logitech device connected — re-probing` 之后约 4 s 才出现 `Backend preference: auto`，且不再有乱码设备名。Windows 不调用 hold_probe，行为不变。
   - 唤醒后的重连等挂起真正结束（`probe_hold_remaining()`，期间若接收器接回把挂起延长，也会等）。
   - Codex 复审指出、未处理的已知缺口（都要在切换/唤醒后 4 s 内恰好发生）：挂起期间按手势键，`_on_report` 回调里的 `_set_cid_reporting` 仍会直接发送，`play_haptic_immediate` 同理；挂起期间从界面改 Smart Shift / 触感 / 力度，请求会在 3 s 后超时被丢弃（设置已保存，下次重连会重新下发）；挂起若在 `_try_connect` 已经开始之后才设，那一轮探测不会中途停下。若实测仍复发，先看是否撞上这几种情况，再考虑在 `_tx` 统一拦截。
+- 2026-11-23 切回 Mac 后 DPI 停在 1000（用户报“DPI 失效”）：10:31:35 连接时查 ADJUSTABLE_DPI 的那一条 IRoot 请求超时（`request timeout feat=0x00 func=0x0 ... params=[22 01 00]`），发现阶段每个功能只问一次，于是这次连接全程 `_dpi_idx` 为空：写 DPI 报 `Cannot set DPI -- not connected`，回读校验直接返回，直到重启 Mouser。11-14 的 4 s 挂起之后 12 次连接里出现 1 次；可能是挂起结束时正好撞上 SteerMouse 写设置，没有直接证据，但“只问一次”的弱点原本就在。
+  - 修复：`_ensure_dpi_idx()`，写 DPI / 读 DPI / 回读校验用到索引而索引为空时重新查一次（每 5 s 最多一次，只在已连上时）；重查也失败时把想要的值记进 `_dpi_reapply_on_wake`，由连上后 4/15/150 s 和每 60 s 的回读补写。日志关键字 `Found ADJUSTABLE_DPI @0x.. (late lookup)`；仍失败时是 `Cannot set DPI -- ADJUSTABLE_DPI feature not found`。跨平台，PC 拉代码即可。
+  - Smart Shift、滚轮、电量的功能索引同样只问一次，这次没改；若出现“切回后某项设置不生效、重启 Mouser 就好”，先查连接那几秒有没有 `request timeout feat=0x00 func=0x0`。
+  - 这次 Codex 审查没做成（Codex 用量上限，11-25 恢复），只做了自查：三个调用点都在监听线程；真没有 DPI 功能的设备每次需要 DPI 时多一条立即返回的请求，不会超时。
+  - 11-14 至 11-23 Mouser 读到的设备名全部正常，没有再出现乱码。
